@@ -148,8 +148,8 @@ activemq-data/
 *.sage.py
 
 # Environments
-.env
-.envrc
+# .env and .envrc are kept because they contain non-secret local dev defaults.
+# Override secrets in the shell or devbox.json instead.
 .venv
 env/
 venv/
@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Devbox / uv / node
+.devbox/
+node_modules/
+uv.lock
+
+# pre-commit
+.pre-commit/
+
+# Stow-generated local config (keep devconfigs/stow under version control)
+.vscode
+Vistui.code-workspace

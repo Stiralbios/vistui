@@ -1,0 +1,3 @@
+#!/bin/bash
+
+devbox run pre-commit run --all-files

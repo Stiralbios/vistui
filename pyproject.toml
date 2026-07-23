@@ -1,0 +1,60 @@
+[project]
+name = "vistui"
+version = "0.0.1"
+description = "Self-hosted memory layer for long-running chatbot conversations"
+requires-python = ">=3.14"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Stiralbios", email = "secret@randomdomain.com" },
+]
+
+dependencies = [
+    "fastapi[standard]",
+    "pydantic-settings",
+    "pydantic-extra-types",
+    "sqlalchemy[asyncio]",
+    "psycopg[binary,pool]",
+    "alembic",
+    "pyjwt",
+    "argon2-cffi",
+    "loguru",
+    "python-multipart",
+    "email-validator",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "polyfactory",
+    "ruff",
+    "mypy",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["sources"]
+testpaths = ["tests"]
+
+[tool.uv]
+default-groups = ["dev"]
+package = false

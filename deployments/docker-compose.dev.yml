@@ -1,0 +1,41 @@
+# docker compose -f deployments/docker-compose.dev.yml up -d
+services:
+  vistui_postgres:
+    image: paradedb/paradedb:pg18
+    container_name: vistui_postgres
+    restart: on-failure
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: vistui
+      POSTGRES_PASSWORD: vistui
+      POSTGRES_DB: vistui
+    volumes:
+      - vistui_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vistui -d vistui"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  vistui_postgres_test:
+    image: paradedb/paradedb:pg18
+    container_name: vistui_postgres_test
+    restart: on-failure
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: vistui
+      POSTGRES_PASSWORD: vistui
+      POSTGRES_DB: vistui
+    volumes:
+      - vistui_postgres_test_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vistui -d vistui"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  vistui_postgres_data:
+  vistui_postgres_test_data:

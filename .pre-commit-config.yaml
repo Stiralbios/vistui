@@ -1,0 +1,30 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.1.2
+    hooks:
+      - id: flake8
+        args: ["--config", ".flake8"]
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.3
+    hooks:
+      - id: bandit
+        args: ["--ini", ".bandit", "-r", "sources/backend"]
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+      - id: mypy
+        args: ["--config-file", "mypy.ini"]
+  - repo: local
+    hooks:
+      - id: backend-tests
+        name: backend pytest
+        language: system
+        entry: bash -c 'devbox run just test'
+        pass_filenames: false
+        stages: [pre-push]

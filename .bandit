@@ -1,0 +1,3 @@
+[bandit]
+targets = sources/backend
+exclude = tests

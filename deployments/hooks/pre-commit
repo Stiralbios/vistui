@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# Run pre-commit only on staged files before each commit.
+devbox run pre-commit run

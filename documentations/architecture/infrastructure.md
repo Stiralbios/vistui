@@ -48,9 +48,9 @@ Vistui runs as a single Python process. APScheduler is embedded in the same proc
 
 | Component | Technology | Purpose | Notes |
 |-----------|------------|---------|-------|
-| Application | Python 3.12, FastAPI, Pydantic, SQLAlchemy | REST API and business logic | Includes embedded APScheduler worker. |
+| Application | Python 3.14, FastAPI, Pydantic, SQLAlchemy | REST API and business logic | Includes embedded APScheduler worker. |
 | Batch worker | APScheduler with SQLAlchemyJobStore | Runs embedding, salience, and consolidation jobs | Single worker, graceful stop. |
-| Database | Postgres 16 with `pgvector` and `pg_search` | Persistence, vector search, BM25 | ParadeDB image recommended. |
+| Database | Postgres 18 with `pgvector` and `pg_search` | Persistence, vector search, BM25 | ParadeDB image recommended. |
 | ORM | SQLAlchemy + Alembic | Schema management and migrations | |
 | Testing | pytest, polyfactory, mutmut | Unit, integration, mutation testing | |
 | LLM adapter | LangChain or thin OpenAI SDK wrapper | Embeddings and completions | TBD in implementation. |

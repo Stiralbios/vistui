@@ -6,6 +6,8 @@ Authentication and access control for the Vistui backend.
 
 Vistui v1 uses lightweight JWT-based authentication. Every operation besides login requires a valid user token. All authenticated users share the same rights in v1; there is no per-resource authorization beyond user scoping.
 
+There is no public user registration in v1. The first user is created automatically from the `DEFAULT_EMAIL` and `DEFAULT_PASSWORD` environment variables at application startup. Additional users, roles, and admin flows are out of scope for v1.
+
 - **Protocol**: OAuth2 Password Flow.
 - **Tokens**: JWT access tokens.
 - **Password Hashing**: Argon2id via `argon2-cffi`.
@@ -18,6 +20,10 @@ Vistui v1 uses lightweight JWT-based authentication. Every operation besides log
 3. Server returns JWT access token.
 4. Client sends token in `Authorization: Bearer <token>` header.
 5. Server validates token on protected endpoints.
+
+### POST `/api/v1/users` / user creation
+
+v1 does **not** expose a public user creation endpoint. The first account is bootstrapped via environment variables. A protected admin create-user endpoint may be added in a later version.
 
 ## Endpoints
 

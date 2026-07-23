@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.0/.schema/devbox.schema.json",
+  "name": "vistui-dev-environment",
+  "packages": [
+    "python314@latest",
+    "uv@latest",
+    "just@latest",
+    "pre-commit@latest",
+    "postgresql@latest",
+    "gcc@latest"
+  ],
+  "env": {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "JWT_SECRET_KEY": "OSEF",
+    "VISTUI_LOG_LEVEL": "DEBUG",
+    "ALLOWED_CORS_ORIGINS": "[\"*\"]",
+    "DEFAULT_EMAIL": "test@example.com",
+    "DEFAULT_PASSWORD": "devpassword123",
+    "VISTUI_DATABASE_URL": "postgresql+psycopg_async://vistui:vistui@localhost:5433/vistui"
+  },
+  "shell": {
+    "init_hook": [
+      "export LD_LIBRARY_PATH=\"$LD_LIBRARY_PATH:$(dirname $(gcc --print-file-name=libstdc++.so.6))\""
+    ]
+  }
+}
