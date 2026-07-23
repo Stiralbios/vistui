@@ -50,9 +50,9 @@ lint:
 typecheck:
     uv run mypy sources tests
 
-# Run pre-commit on all files
+# Run prek on all files
 precommit:
-    devbox run pre-commit run --all-files
+    devbox run prek run --all-files
 
 # Install git hooks
 install_hooks:
