@@ -185,7 +185,14 @@ curl http://localhost:8000/health
 - Provider configuration / LLM calls
 - Frontend
 
+## Status
+
+**Completed** ✅
+
+All implementation steps are done, tests pass, prek hooks run successfully, and the changes are pushed to `origin main`.
+
 ## Changelog
 
 - 2026-07-23: Created plan1.md for the login-only milestone.
 - 2026-07-23: Switched git hooks manager from pre-commit to prek.
+- 2026-07-23: Marked milestone as completed.
