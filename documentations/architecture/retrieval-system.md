@@ -128,6 +128,7 @@ Before ranking, raw scores are normalized per category to the range `[0, 1]` usi
 |-------|---------------|
 | `vector_score` | `raw_vector_score / max_vector_score_in_category` |
 | `bm25_score` | `raw_bm25_score / max_bm25_score_in_category` |
+| `linked_count` | `raw_linked_count / max_linked_count_in_category` |
 
 This makes heterogeneous search signals comparable and allows the ranking formula to combine them meaningfully.
 

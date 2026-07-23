@@ -5,7 +5,6 @@ description: >-
   "commit and push my changes", "write commit and push", "git commit and push
   the new feature", "stage my changes and push to origin"
 mode: subagent
-model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
 permission:
   edit: deny
 ---

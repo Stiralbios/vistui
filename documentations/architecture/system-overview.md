@@ -2,7 +2,7 @@
 
 ## Context
 
-Vistui ("for knowledge" in old gaulish) is a self-hosted REST API that stores and retrieves memory from long-running conversations with chatbots. It is primarily intended for AI companion and roleplay chats, but is kept frontend-agnostic: any chatbot frontend (SillyTavern, OpenWebUI, etc.) can integrate via extensions or MCP servers as long as they send data in the expected format.
+Vistui ("for knowledge" in old gaulish) is a self-hosted REST API that stores and retrieves memory from long-running conversations with chatbots. It is primarily intended for roleplay chats, but is kept use-case agnostic and frontend-agnostic: any chatbot frontend (SillyTavern, OpenWebUI, etc.) can integrate via extensions or MCP servers as long as they send data in the expected format.
 
 The core insight is that perfect, immediate memory consolidation is not required. Modern chatbots already have a large context window for recent history. Vistui therefore uses asynchronous batch jobs to consolidate older messages into richer memory structures (events, topics, facts) during periods of low activity. This trades strict consistency for simplicity, cost, and self-hosting friendliness.
 
