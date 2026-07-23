@@ -28,6 +28,7 @@ No public user registration, no ChatGroup/Message/retrieval/batch features yet.
 | API prefix | `/api/v1` |
 | Migrations | Alembic; applied manually via `just migrate` during development |
 | Logging | Text, colored, via loguru |
+| Git hooks | `prek` (drop-in Rust replacement for pre-commit) |
 
 ## Project layout
 
@@ -81,12 +82,14 @@ No public user registration, no ChatGroup/Message/retrieval/batch features yet.
 ### 1. Dev environment
 
 Create:
-- `devbox.json` with Python 3.14, uv, PostgreSQL CLI tools, gcc
+- `devbox.json` with Python 3.14, uv, just, prek, PostgreSQL CLI tools, gcc
 - `.envrc` for direnv + devbox integration
 - `.env` for `PYTHONPATH=sources`
 - `pyproject.toml` with `uv` metadata, runtime and dev dependencies
 - `justfile` for common tasks
 - `deployments/docker-compose.dev.yml` with dev and test ParadeDB containers
+- `.pre-commit-config.yaml`, `.flake8`, `.bandit`, `mypy.ini`
+- `deployments/hooks/pre-commit` and `pre-push` using `prek`
 - Update `.gitignore`
 
 ### 2. Migrations
@@ -150,6 +153,9 @@ just up
 # apply migrations
 just migrate
 
+# run prek hooks
+just precommit
+
 # start the server
 just run
 ```
@@ -160,7 +166,7 @@ Then:
 # login as the seeded default user
 curl -X POST http://localhost:8000/api/v1/auth/jwt/login \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'username=test@vistui.local&password=devpassword123'
+  -d 'username=test@example.com&password=devpassword123'
 
 # current user
 curl http://localhost:8000/api/v1/auth/me \
@@ -182,3 +188,4 @@ curl http://localhost:8000/health
 ## Changelog
 
 - 2026-07-23: Created plan1.md for the login-only milestone.
+- 2026-07-23: Switched git hooks manager from pre-commit to prek.
