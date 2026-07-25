@@ -120,10 +120,11 @@ flowchart LR
 
 1. **Phase 1:** Dev environment (Python 3.14, uv, devbox, direnv, ParadeDB), Alembic migrations, user management, and JWT login.
 2. **Phase 2:** Core entities, API, Postgres schema, basic message CRUD.
-3. **Phase 3:** Embedding, keyword generation, memory ratio, and retrieval pipeline.
-4. **Phase 4:** Batch embedding/salience jobs and batch consolidation (event, topic, fact).
-5. **Phase 5:** Configurable prompts, ranking formula, and ChatGroup tuning.
-6. **Phase 6:** Provider configuration file and packaging.
+3. **Phase 3:** Real search infrastructure — filters, BM25/vector search APIs, ranking formula integration, and memory retrieval endpoints.
+4. **Phase 4:** Embedding generation, memory ratio, and retrieval pipeline.
+5. **Phase 5:** Batch embedding/salience jobs and batch consolidation (event, topic, fact).
+6. **Phase 6:** Configurable prompts, ranking formula, and ChatGroup tuning.
+7. **Phase 7:** Provider configuration file and packaging.
 
 ## Open questions
 

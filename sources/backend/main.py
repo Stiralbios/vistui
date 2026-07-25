@@ -3,12 +3,18 @@ import traceback
 from contextlib import asynccontextmanager
 
 from backend.auth import apis as auth
+from backend.chat import apis as chat
+from backend.chatgroup import apis as chatgroup
 from backend.database import create_db_and_tables
+from backend.event import apis as event
 from backend.exceptions import BaseProblem
+from backend.fact import apis as fact
 from backend.health import apis as health
 from backend.logconfig import configure_loggers
+from backend.message import apis as message
 from backend.seeders import create_default_user
 from backend.settings import AppSettings
+from backend.topic import apis as topic
 from backend.user import apis as user
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,6 +49,12 @@ app = FastAPI(debug=True, lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(user.router)
+app.include_router(chatgroup.router)
+app.include_router(chat.router)
+app.include_router(message.router)
+app.include_router(event.router)
+app.include_router(topic.router)
+app.include_router(fact.router)
 
 app.add_middleware(
     CORSMiddleware,

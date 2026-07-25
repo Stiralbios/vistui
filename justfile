@@ -35,7 +35,7 @@ test:
     JWT_SECRET_KEY=OSEF \
     DEFAULT_EMAIL=test@example.com \
     DEFAULT_PASSWORD=devpassword123 \
-    PYTHONPATH=sources \
+    PYTHONPATH=sources:tests \
     uv run pytest
 
 # Format code

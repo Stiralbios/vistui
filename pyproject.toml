@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-extra-types",
     "sqlalchemy[asyncio]",
     "psycopg[binary,pool]",
+    "pgvector",
     "alembic",
     "pyjwt",
     "argon2-cffi",
