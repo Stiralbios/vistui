@@ -1,6 +1,6 @@
 from typing import Any, Generic, TypeVar
 
-from pgvector.sqlalchemy import VECTOR
+from paradedb.sqlalchemy.vector import Vector
 from polyfactory.factories.sqlalchemy_factory import SQLAlchemyFactory
 from pydantic import BaseModel
 from sqlalchemy.dialects.postgresql import TSVECTOR
@@ -20,7 +20,7 @@ class BaseFactory(SQLAlchemyFactory, Generic[T]):
         types = super().get_sqlalchemy_types()
         types[NullType] = lambda: None
         types[TSVECTOR] = lambda: None
-        types[VECTOR] = lambda: None
+        types[Vector] = lambda: None
         return types
 
     @classmethod

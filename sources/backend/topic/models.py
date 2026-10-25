@@ -3,7 +3,7 @@ import uuid
 from typing import Any
 
 from backend.database import Base
-from pgvector.sqlalchemy import VECTOR
+from paradedb.sqlalchemy.vector import Vector
 from sqlalchemy import DateTime, Float, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
@@ -16,7 +16,7 @@ class TopicDO(Base):
     chatgroup_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chatgroup.id"), nullable=False)
     full_text: Mapped[str] = mapped_column(Text, nullable=False)
     search_vector: Mapped[Any] = mapped_column(TSVECTOR, nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(VECTOR(768), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
     start_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_edited_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     salience_score: Mapped[float | None] = mapped_column(Float, nullable=True)

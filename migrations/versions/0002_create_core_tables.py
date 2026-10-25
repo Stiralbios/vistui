@@ -10,7 +10,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
-from pgvector.sqlalchemy import VECTOR
+from paradedb.sqlalchemy.vector import Vector
 from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy.dialects.postgresql import TSVECTOR
 
@@ -59,7 +59,7 @@ def upgrade() -> None:
         sa.Column("prev_message_id", sa.Uuid(), nullable=True),
         sa.Column("full_text", sa.Text(), nullable=False),
         sa.Column("search_vector", TSVECTOR(), nullable=True),
-        sa.Column("embedding", VECTOR(768), nullable=True),
+        sa.Column("embedding", Vector(768), nullable=True),
         sa.Column("role", sa.String(length=20), nullable=False),
         sa.Column("salience_score", sa.Float(), nullable=True),
         sa.Column("processing_state", PG_JSONB(), nullable=False),
@@ -76,7 +76,7 @@ def upgrade() -> None:
         sa.Column("chat_id", sa.Uuid(), nullable=False),
         sa.Column("full_text", sa.Text(), nullable=False),
         sa.Column("search_vector", TSVECTOR(), nullable=True),
-        sa.Column("embedding", VECTOR(768), nullable=True),
+        sa.Column("embedding", Vector(768), nullable=True),
         sa.Column("start_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("end_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("salience_score", sa.Float(), nullable=True),
@@ -92,7 +92,7 @@ def upgrade() -> None:
         sa.Column("chatgroup_id", sa.Uuid(), nullable=False),
         sa.Column("full_text", sa.Text(), nullable=False),
         sa.Column("search_vector", TSVECTOR(), nullable=True),
-        sa.Column("embedding", VECTOR(768), nullable=True),
+        sa.Column("embedding", Vector(768), nullable=True),
         sa.Column("start_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_edited_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("salience_score", sa.Float(), nullable=True),
@@ -108,7 +108,7 @@ def upgrade() -> None:
         sa.Column("chatgroup_id", sa.Uuid(), nullable=False),
         sa.Column("full_text", sa.Text(), nullable=False),
         sa.Column("search_vector", TSVECTOR(), nullable=True),
-        sa.Column("embedding", VECTOR(768), nullable=True),
+        sa.Column("embedding", Vector(768), nullable=True),
         sa.Column("start_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_edited_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("salience_score", sa.Float(), nullable=True),

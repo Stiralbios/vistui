@@ -12,6 +12,8 @@ class AppSettings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRATION_MINUTES: int = 60
     VISTUI_DATABASE_URL: SecretStr = SecretStr("postgresql+psycopg_async://vistui:vistui@localhost:5433/vistui")
     ALLOWED_CORS_ORIGINS: list[str] = ["*"]
+    VISTUI_SEED_DEMO: bool = False
+    VISTUI_BATCH_INTERVAL_SECONDS: int = 60
 
 
 class InitSettings(BaseSettings):

@@ -2,7 +2,9 @@ import asyncio
 import traceback
 from contextlib import asynccontextmanager
 
+from backend.admin import apis as admin
 from backend.auth import apis as auth
+from backend.batch import start_scheduler, stop_scheduler
 from backend.chat import apis as chat
 from backend.chatgroup import apis as chatgroup
 from backend.database import create_db_and_tables
@@ -12,7 +14,7 @@ from backend.fact import apis as fact
 from backend.health import apis as health
 from backend.logconfig import configure_loggers
 from backend.message import apis as message
-from backend.seeders import create_default_user
+from backend.seeders import create_default_user, seed_demo_chat
 from backend.settings import AppSettings
 from backend.topic import apis as topic
 from backend.user import apis as user
@@ -39,9 +41,15 @@ def custom_exception_handler(loop, context):
 async def lifespan(app: FastAPI):
     await create_db_and_tables()
     await create_default_user()
+    if AppSettings().APP_ENVIRONMENT != "TEST":
+        start_scheduler()
+    if AppSettings().VISTUI_SEED_DEMO:
+        await seed_demo_chat()
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(custom_exception_handler)
     yield
+    if AppSettings().APP_ENVIRONMENT != "TEST":
+        stop_scheduler()
 
 
 app = FastAPI(debug=True, lifespan=lifespan)
@@ -55,6 +63,7 @@ app.include_router(message.router)
 app.include_router(event.router)
 app.include_router(topic.router)
 app.include_router(fact.router)
+app.include_router(admin.router)
 
 app.add_middleware(
     CORSMiddleware,
