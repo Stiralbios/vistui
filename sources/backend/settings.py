@@ -13,6 +13,10 @@ class AppSettings(BaseSettings):
     VISTUI_DATABASE_URL: SecretStr = SecretStr("postgresql+psycopg_async://vistui:vistui@localhost:5433/vistui")
     ALLOWED_CORS_ORIGINS: list[str] = ["*"]
     VISTUI_SEED_DEMO: bool = False
+    # Default protected window — the x most recent messages of a chat that are never
+    # added to facts/events/topics until newer messages push them out of the window.
+    # ChatGroups can override it per group via their config's protected_message_count.
+    VISTUI_PROTECTED_MESSAGE_COUNT: int = 10
     VISTUI_BATCH_INTERVAL_SECONDS: int = 60
     # Batch worker: per-round work limits of the batch stages (the consolidation
     # pipelines event/topic/fact are single-message by design). See

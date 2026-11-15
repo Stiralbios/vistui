@@ -59,7 +59,7 @@ async def _queue_depth(client: AsyncClient) -> int:
     return response.json()["queue_depth"]
 
 
-PROTECTED_COUNT = 5
+PROTECTED_COUNT = AppSettings().VISTUI_PROTECTED_MESSAGE_COUNT
 
 
 def _assert_real_embedding(obj) -> None:
@@ -79,9 +79,11 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             assert chat is not None, "app startup (VISTUI_SEED_DEMO=1) should have seeded the demo chat"
             chatgroup = await session.scalar(select(ChatGroupDO).where(ChatGroupDO.id == chat.chatgroup_id))
             assert chatgroup is not None
-            # Shrink the protected window (default 10) to 5: the 25 oldest messages are
-            # eligible for consolidation, the 5 most recent must stay untouched.
-            chatgroup.config = {**chatgroup.config, "protected_message_count": PROTECTED_COUNT}
+            # The demo chatgroup keeps the default protected window
+            # (VISTUI_PROTECTED_MESSAGE_COUNT, 10 by default, overridable per chatgroup
+            # via its config): the oldest messages are eligible for consolidation, the
+            # PROTECTED_COUNT most recent must stay untouched.
+            assert chatgroup.config.get("protected_message_count") == PROTECTED_COUNT
 
         assert await _queue_depth(client) == 30
 
@@ -145,9 +147,9 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
                 assert message.processing_state["topic"] == ProcessingStatus.DONE
                 assert message.processing_state["fact"] == ProcessingStatus.DONE
 
-            # Protected window: the 5 most recent messages keep their event/topic flags
-            # waiting (they become eligible only as the chat grows); the fact stage ignores
-            # the window but processes one message per round and has not reached them yet.
+            # Protected window: the PROTECTED_COUNT most recent messages keep their
+            # event/topic/fact flags waiting (protected messages are never added to
+            # facts/events/topics; they become eligible only as the chat grows)...
             for message in messages[-PROTECTED_COUNT:]:
                 assert message.processing_state["event"] == ProcessingStatus.WAITING
                 assert message.processing_state["topic"] == ProcessingStatus.WAITING

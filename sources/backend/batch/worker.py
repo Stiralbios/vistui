@@ -97,14 +97,11 @@ class BatchWorker:
     async def _peek_message_id(state_key: str) -> uuid.UUID | None:
         """Return the id of the next message waiting for this stage (None for the batch
         stages — embeddings and both salience stages — which operate on batches rather
-        than a single message). The fact stage ignores the protected window like its
-        pipeline does."""
+        than a single message)."""
         if state_key in ("embedding", "memory_embedding", "salience", "memory_salience"):
             return None
         async with get_async_sessionmaker()() as session, session.begin():
-            message = await BatchQueries.get_single_message_with_state(
-                session, state_key, outside_protected_window=state_key != "fact"
-            )
+            message = await BatchQueries.get_single_message_with_state(session, state_key)
             return message.id if message else None
 
     @staticmethod

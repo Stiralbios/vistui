@@ -63,7 +63,7 @@ Each message has five independent processing flags in `processing_state`:
 Rules:
 
 - `embedding` and `salience` run for all messages, regardless of protected window.
-- `event`, `topic`, and `fact` only run for messages outside the protected window (`protected_message_count` most recent messages in a Chat).
+- `event`, `topic`, and `fact` only run for messages outside the protected window (`protected_message_count` most recent messages in a Chat — the protected messages are never added to facts, events or topics). The window size is configured per chatgroup via its config; deployments change the default with the `VISTUI_PROTECTED_MESSAGE_COUNT` setting (10).
 - The most recent messages are excluded from consolidation to avoid complications from edits, rerolls, and deletions.
 - Older messages are processed first.
 - Each pipeline can fail independently and is retried with exponential backoff.
@@ -165,11 +165,10 @@ The fact pipeline uses two LLM calls.
 
 #### Step A: identify candidate facts
 
-1. Select the oldest unprocessed message (`fact = waiting`) with `embedding = done` and `salience = done`. Unlike events and topics, the fact pipeline ignores the protected window: a fact is a cheap, self-contained extraction, so even the most recent messages get theirs promptly.
+1. Select the oldest unprocessed message (`fact = waiting`) outside the protected window, with `embedding = done` and `salience = done` — like events and topics, protected messages are never added to facts until they age out of the window. A fact itself is never protected from updates: once the updating message is outside the window, the fact can be rewritten in place.
 2. Search existing Facts in the ChatGroup.
 3. Send the message and the top matching facts to the `fact_candidate` LLM prompt.
 4. The LLM selects up to `max_facts_per_message` existing facts that might need updating, or decides that a new fact should be created.
-5. If the message is inside the protected window and the LLM wants to update an existing fact, the whole decision is deferred: nothing is applied, the message stays `fact = waiting`, and it is retried once it ages out of the window (a fact must never be rewritten from a message that may still be edited or deleted). Creates are never deferred.
 
 Outputs:
 
@@ -279,11 +278,19 @@ Status response:
 
 ## Changelog
 
+- 2026-11-15: Corrected the same-day revision: protected messages are never added to
+  facts either — the fact pipeline is window-gated like event and topic, and the
+  update-deferral mechanism was removed. The protected window size is now
+  configurable at the deployment level: `VISTUI_PROTECTED_MESSAGE_COUNT` (default 10)
+  backs the `ChatGroupConfig.protected_message_count` default and the fallback for
+  config rows predating the key; the integration test now runs with the configured
+  default instead of a hardcoded window of 5.
 - 2026-11-15: Batch stage round limits are configurable through the `VISTUI_BATCH_*`
   settings and the salience default dropped to 5 per round (user decision; was 10).
   Facts no longer respect the protected window (user decision): fact extraction runs
   on any embedded, salience-done message, but an update of an existing fact is
   deferred until the updating message ages out of the window.
+  [Corrected the same day: see the newer entry above — facts are window-gated again.]
 - 2026-07-11: Initial batch consolidation design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: added embedding/salience as prerequisite batch pipelines, sequential per-message event→topic→fact ordering, event LLM can return multiple events, `fact_candidate` can create new facts, `fact_update` only updates existing facts.
 

@@ -13,7 +13,7 @@
 | Embedding model | `embeddinggemma-2:740m` (natively 768-dim — matches `Vector(768)` schema; no truncation parameter needed). Measured warm on the current CPU-only Ollama host: ~0.10s vs ~1.69s per query for `qwen3-embedding:8b` (~17× faster). Switch is config-only (`providers.yaml`); revert by pointing back at `qwen3-embedding:8b`. |
 | Existing vectors | Embeddings from different models are not comparable: switching requires re-embedding everything. New admin endpoint `POST /admin/reembed` nulls all vectors and requeues them; the worker refills over the next rounds. |
 | Event continuity | The most recent Event of a chat is **edited/extended** when the next eligible block continues it, instead of always creating a new Event. Decision (extend vs new block) by `d3:4b`; rewritten summary by `gemma4:e4b`. |
-| Protected window | Unchanged invariant: the `protected_message_count` (default 10) most recent messages of a chat never enter an Event until they leave the window (already enforced by `_is_outside_protected_window()` in `queries.py`). Extension only ever touches eligible messages. |
+| Protected window | Unchanged invariant: the `protected_message_count` most recent messages of a chat never enter facts, events or topics until they leave the window (already enforced by `_is_outside_protected_window()` in `queries.py`). The default (10) is configurable per chatgroup and deployment-wide via `VISTUI_PROTECTED_MESSAGE_COUNT`. Extension only ever touches eligible messages. |
 | BM25 | ParadeDB `bm25` index over the raw `full_text` column (tokenization is handled by the index; rows are indexed automatically on insert/update). The `search_vector` TSVECTOR column is **dropped**: nothing ever wrote it, and hybrid fusion already happens at the ranking-formula level (`vector_score`, `bm25_score`), so a separate Postgres-native tsvector is redundant. Re-add later only if Postgres-native `ts_rank` scoring is ever needed. |
 | Salience | Real scoring via `d3:4b`: new batch stage scores messages (and memory objects) 0.0–1.0. The Phase 3 short-circuit is removed: the seeder no longer pre-marks salience `done` and no longer hardcodes `0.5`. `ChatGroupConfig.use_salience` false/null opts out: the stage only marks `done`, `salience_score` stays NULL, and the search formula passes the neutral salience (1.0) for those rows. |
 | Decision model | `d3:4b` handles all create/update/skip decisions (topic candidates, fact candidates, event grouping boundaries, extend-vs-new). `gemma4:e4b` writes all summaries. This maps onto the existing prompt/task split (`topic_candidate` vs `topic_update`, `fact_candidate` vs `fact_update`). |
@@ -327,6 +327,12 @@ Unit/integration test updates:
 - 2026-11-15: Middle step before 4.4/4.5: switched providers.yaml to the gomodel proxy (embedding via the `ollama_yople` upstream, LLM to `strata_toaster/iq3_xxs`), and validated the `d3:4b` decision model: it is System One-only (`/v1/systemone`, no chat completions) and gomodel cannot proxy that endpoint to ollama yet, so decisions go direct to `local-ollama`. See §9.
 - 2026-11-15: Decision-model support in code: `defaults.decision` key in providers.yaml (local-ollama/d3:4b) and `Provider.decide()` — a System One client with typed `ChoiceQuestion`/`NoulQuestion`/`ScoreQuestion` models, `DecisionAnswer` parsing, keep_alive passthrough and 8 hermetic tests. See §9.
 - 2026-11-15: Removed the never-wired `keywords` task (ChatGroupPrompts field, providers.yaml override, docs): no pipeline called it, nothing stored it, and BM25 indexes raw text. `memory_ratio` kept for the future search token-budget split (issue 002).
+- 2026-11-15: Corrected the same-day fact revision: protected messages are never added
+  to facts either — the fact pipeline is window-gated like event and topic, and the
+  update-deferral mechanism was removed. The protected window size is configurable:
+  `VISTUI_PROTECTED_MESSAGE_COUNT` (default 10) backs the
+  `ChatGroupConfig.protected_message_count` default and the query fallback; the
+  integration test runs with the configured default instead of a hardcoded 5.
 - 2026-11-15: Batch stage round limits are now configurable through the `VISTUI_BATCH_*`
   settings and the salience default dropped from 10 to 5 per round (user decision).
   Facts no longer respect the protected window (user decision): extraction runs on any
@@ -373,9 +379,10 @@ message, state = chatgroup description + the single message, a `ScoreQuestion` n
 for events/topics/facts, up to 32 per round, one call per object). All batch stage round
 limits are configurable through the `VISTUI_BATCH_*` settings (embedding 32, memory
 embedding 32, salience 5, memory salience 32, event block size 10); the worker passes
-them to the stages. Facts now ignore the protected window (user decision): any
-embedded, salience-done message gets its fact extracted immediately, but an update of
-an existing fact is deferred until the updating message ages out of the window. Opt-out
+them to the stages. Protected messages are never added to facts, events or topics
+(the same-day fact-window exemption was reverted on clarification); the window size
+is configurable per chatgroup via `protected_message_count`, with the deployment
+default in `VISTUI_PROTECTED_MESSAGE_COUNT` (10). Opt-out
 (`use_salience` false/null) marks the message stage done but leaves the score NULL — no
 decision call, neutral 1.0 at scoring time. The event/topic/fact queries now enforce the
 documented `salience = done` gate; topic/fact rewrites clear `salience_score` with the
@@ -383,10 +390,9 @@ embedding; the seeder queues salience like any other stage. `VISTUI_BATCH_INTERV
 disables the background scheduler (used by `just test-integration` to kill the
 admin-trigger-vs-scheduler race).
 
-**Verification:** 93 unit tests (12 new: decide task override, salience scoring,
+**Verification:** 91 unit tests (10 new: decide task override, salience scoring,
 limits, opt-out NULL, malformed-answer rollback, memory scoring, gate, queue count,
-seeded state, worker round, worker salience-limit setting, fact window exemption,
-protected update deferral). Live end-to-end on the dev DB against real d3:4b: batched
+seeded state, worker round, worker salience-limit setting). Live end-to-end on the dev DB against real d3:4b: batched
 first cut 10 messages in 2 chunked calls (246s) + 10 memory objects in 3 calls (160s);
 element-per-element 4 messages in 4 calls (37s, ~9s each) — hiking plans/preferences
 0.26–0.66, minor context ~0.2–0.4, stale placeholder texts 0.06–0.22. All hooks green

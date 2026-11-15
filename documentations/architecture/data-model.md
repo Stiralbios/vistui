@@ -122,7 +122,7 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `token_budget` | Default max tokens to return in memory retrieval. |
 | `memory_ratio` | Default category distribution when the LLM-based ratio is disabled or fails. |
 | `use_llm_memory_ratio` | If `true`, generate the memory ratio with an LLM per message. If `false`, use `memory_ratio`. |
-| `protected_message_count` | Number of most recent messages excluded from event/topic consolidation and from *updates* of existing facts; fact extraction itself ignores the window. |
+| `protected_message_count` | Number of most recent messages never added to facts/events/topics until newer messages push them out of the window. Default follows the deployment's `VISTUI_PROTECTED_MESSAGE_COUNT` setting (10). |
 | `topic_update_threshold` | Minimum score for a topic to be considered for updating. |
 | `fact_update_threshold` | Minimum score for a fact to be considered for updating. |
 | `fact_history_count` | Number of previous fact-linked messages sent to the LLM when updating a fact. |

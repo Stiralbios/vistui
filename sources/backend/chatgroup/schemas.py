@@ -2,6 +2,7 @@ import datetime as dt
 import uuid
 from typing import Any
 
+from backend.settings import AppSettings
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Ranking default: both score channels are normalized to 0..1 by `backend.search.scoring`
@@ -29,7 +30,10 @@ class ChatGroupConfig(BaseModel):
     # salience_score NULL (nothing is fabricated) and the search formula passes the
     # neutral salience (1.0) for them.
     use_salience: bool | None = True
-    protected_message_count: int = 10
+    # The x most recent messages of a chat never enter facts/events/topics until newer
+    # messages push them out of the window. The default follows the deployment's
+    # VISTUI_PROTECTED_MESSAGE_COUNT setting; each chatgroup can override it.
+    protected_message_count: int = Field(default_factory=lambda: AppSettings().VISTUI_PROTECTED_MESSAGE_COUNT)
     topic_update_threshold: float = 0.75
     fact_update_threshold: float = 0.80
     fact_history_count: int = 5

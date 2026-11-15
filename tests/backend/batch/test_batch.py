@@ -1,5 +1,4 @@
 import datetime as dt
-import json
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -48,7 +47,6 @@ def _fake_embeddings():
 
 def _fake_chat_model(
     topic_content: str = '{"actions": [{"action": "create", "summary": "Demo topic"}]}',
-    fact_content: str = '{"actions": [{"action": "create", "summary": "Demo fact"}]}',
 ):
     """Return a LangChain ChatOpenAI whose ainvoke returns deterministic JSON."""
 
@@ -67,7 +65,7 @@ def _fake_chat_model(
             elif "topics" in prompt:
                 content = topic_content
             elif "facts" in prompt:
-                content = fact_content
+                content = '{"actions": [{"action": "create", "summary": "Demo fact"}]}'
             else:
                 content = "{}"
             return SimpleNamespace(content=content)
@@ -498,109 +496,10 @@ async def test_fact_pipeline():
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
-async def test_fact_pipeline_ignores_protected_window():
-    """Facts are extracted even from messages inside the protected window: the fact
-    stage is not window-gated (unlike events and topics), so a brand-new message gets
-    its fact immediately."""
-    async with get_async_sessionmaker()() as session, session.begin():
-        chatgroup, chat = await _make_test_chat(session, protected_message_count=5)
-        msg = await _add_message(session, chat.id, "My favorite color is blue")
-        msg.embedding = [0.0] * 768
-
-    # The only message is inside the window: topics wait, facts don't.
-    assert await TopicPipeline.run_round() == 0
-    assert await FactPipeline.run_round() == 1
-
-    async with get_async_sessionmaker()() as session, session.begin():
-        facts = list((await session.execute(select(FactDO).where(FactDO.chatgroup_id == chatgroup.id))).scalars().all())
-        assert len(facts) == 1
-        assert facts[0].full_text == "Demo fact"
-        updated = await session.get(MessageDO, msg.id)
-        assert updated is not None
-        assert updated.processing_state["fact"] == ProcessingStatus.DONE
-
-
-async def test_fact_pipeline_defers_protected_updates():
-    """A message inside the protected window must not rewrite an existing fact: the
-    decision is deferred (nothing applied, message stays waiting) and re-run once the
-    message ages out of the window."""
-    async with get_async_sessionmaker()() as session, session.begin():
-        chatgroup, chat = await _make_test_chat(session, protected_message_count=2)
-        base = dt.datetime.now(dt.timezone.utc)
-        fact = FactDO(
-            chatgroup_id=chatgroup.id,
-            full_text="Old fact text",
-            start_at=base,
-            last_edited_at=base,
-            embedding=[0.1] + [0.0] * 767,
-        )
-        session.add(fact)
-        msg = await _add_message(
-            session, chat.id, "Actually, the fact changed", created_at=base + dt.timedelta(seconds=1)
-        )
-        msg.embedding = [0.1] + [0.0] * 767
-        await session.flush()
-        update_content = json.dumps(
-            {"actions": [{"action": "update", "fact_id": str(fact.id), "summary": "Updated fact text"}]}
-        )
-
-    with (
-        patch("backend.llm.provider.OpenAIEmbeddings", _fake_embeddings()),
-        patch("backend.llm.provider.ChatOpenAI", _fake_chat_model(fact_content=update_content)),
-    ):
-        # The message is protected (no newer messages): the update is deferred.
-        assert await FactPipeline.run_round() == 0
-        async with get_async_sessionmaker()() as session, session.begin():
-            unchanged = await session.get(FactDO, fact.id)
-            assert unchanged is not None
-            assert unchanged.full_text == "Old fact text"
-            assert unchanged.embedding is not None
-            assert unchanged.salience_score is None
-            links = list(
-                (await session.execute(select(FactMessageLinkDO).where(FactMessageLinkDO.fact_id == fact.id)))
-                .scalars()
-                .all()
-            )
-            assert links == []
-            waiting = await session.get(MessageDO, msg.id)
-            assert waiting is not None
-            assert waiting.processing_state["fact"] == ProcessingStatus.WAITING
-
-        # Two newer messages push the original one out of the window.
-        async with get_async_sessionmaker()() as session, session.begin():
-            for i in range(2):
-                await _add_message(
-                    session,
-                    chat.id,
-                    f"Newer message {i}",
-                    created_at=base + dt.timedelta(seconds=10 + i),
-                )
-
-        # Now outside the window, the same update decision applies.
-        assert await FactPipeline.run_round() == 1
-        async with get_async_sessionmaker()() as session, session.begin():
-            updated_fact = await session.get(FactDO, fact.id)
-            assert updated_fact is not None
-            assert updated_fact.full_text == "Updated fact text"
-            assert updated_fact.embedding is None, "updated facts must be re-embedded"
-            assert updated_fact.salience_score is None, "updated facts must be re-scored"
-            links = list(
-                (await session.execute(select(FactMessageLinkDO).where(FactMessageLinkDO.fact_id == fact.id)))
-                .scalars()
-                .all()
-            )
-            assert len(links) == 1
-            done = await session.get(MessageDO, msg.id)
-            assert done is not None
-            assert done.processing_state["fact"] == ProcessingStatus.DONE
-
-
-@pytest.mark.usefixtures("fake_langchain_client")
 async def test_protected_window_skips_recent_messages():
-    """The `protected_message_count` most recent messages are skipped by event/topic
-    consolidation, but the embedding stage still processes them — and the fact stage
-    ignores the window entirely (facts are extracted even from protected messages; only
-    updates of existing facts are deferred, see test_fact_pipeline_defers_protected_updates)."""
+    """The `protected_message_count` most recent messages are never added to
+    facts/events/topics (consolidation skips them until newer messages push them out of
+    the window), but the embedding and salience stages still process them."""
     async with get_async_sessionmaker()() as session, session.begin():
         chatgroup, chat = await _make_test_chat(session, protected_message_count=5)
         base = dt.datetime.now(dt.timezone.utc)
@@ -622,13 +521,9 @@ async def test_protected_window_skips_recent_messages():
     assert await EventPipeline.run_round() == 7
     assert await EventPipeline.run_round() == 0  # remaining candidates are all protected
 
-    # Topic stage processes the oldest non-protected message, one per round.
+    # Topic/fact stages process the oldest non-protected message, one per round.
     assert await TopicPipeline.run_round() == 1
-
-    # Fact stage ignores the window: one message per round, protected ones included.
-    for _ in range(12):
-        assert await FactPipeline.run_round() == 1
-    assert await FactPipeline.run_round() == 0
+    assert await FactPipeline.run_round() == 1
 
     async with get_async_sessionmaker()() as session, session.begin():
         first = await session.get(MessageDO, messages[0].id)
@@ -641,13 +536,13 @@ async def test_protected_window_skips_recent_messages():
             assert updated is not None
             assert updated.embedding is not None, "embedding must not respect the window"
             assert updated.processing_state["embedding"] == ProcessingStatus.DONE
-            assert updated.processing_state["fact"] == ProcessingStatus.DONE, "facts must not respect the window"
             if i < 7:
                 assert updated.processing_state["event"] == ProcessingStatus.DONE
             else:
-                # Last 5 messages: inside the protected window, event/topic untouched.
+                # Last 5 messages: inside the protected window, never consolidated.
                 assert updated.processing_state["event"] == ProcessingStatus.WAITING
                 assert updated.processing_state["topic"] == ProcessingStatus.WAITING
+                assert updated.processing_state["fact"] == ProcessingStatus.WAITING
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
