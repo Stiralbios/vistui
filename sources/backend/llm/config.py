@@ -14,6 +14,7 @@ class LLMSettings(BaseSettings):
     VISTUI_LLM_API_KEY: SecretStr | None = None
     VISTUI_EMBEDDING_MODEL: str = "embeddinggemma-2:740m"
     VISTUI_CHAT_MODEL: str = "gemma4:e4b"
+    VISTUI_DECISION_MODEL: str = "d3:4b"
     VISTUI_EMBEDDING_DIMENSIONS: int = 768
     VISTUI_LLM_TIMEOUT_SECONDS: int = 120
 
@@ -43,9 +44,22 @@ class LLMDefaults(BaseModel):
     max_tokens: int = 2048
 
 
+class DecisionDefaults(BaseModel):
+    """Default provider/model for decision calls (ollama System One models).
+
+    Decision models such as `d3` answer typed questions through `/v1/systemone` with
+    probabilities and rubric scores; they have no chat-completions endpoint, which is
+    why they get their own defaults key instead of reusing the chat one.
+    """
+
+    provider: str
+    model: str
+
+
 class DefaultsConfig(BaseModel):
     embedding: EmbeddingDefaults
     llm: LLMDefaults
+    decision: DecisionDefaults
 
 
 class TaskConfig(BaseModel):
@@ -96,6 +110,10 @@ class ProviderConfig(BaseModel):
                     model=settings.VISTUI_CHAT_MODEL,
                     temperature=0.0,
                     max_tokens=2048,
+                ),
+                decision=DecisionDefaults(
+                    provider="default",
+                    model=settings.VISTUI_DECISION_MODEL,
                 ),
             ),
         )

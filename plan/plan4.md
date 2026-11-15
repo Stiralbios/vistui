@@ -174,6 +174,7 @@ class SaliencePipeline:
 
 ### 4.5 Decision model for create/update choices (topics & facts)
 
+And to choose to extend or create a new event. And memory ratio. And basically anything that output something else than fee text
 Restructure `TopicPipeline`/`FactPipeline` into decide → generate, mapping onto the existing prompt pair:
 
 | Step | Model (task) | Output |
@@ -305,6 +306,8 @@ Unit/integration test updates:
 - 2026-11-15: Ranking follow-up on search: default formula as a pydantic default, no hardcoded formulas, logarithmic `link_weight`, 0..1 normalization of both score channels. See §9.
 - 2026-11-15: Code review of the whole uncommitted Phase 4 diff: BM25 query-token quoting (500 fix), NaN guard, reembed constant. See §9.
 - 2026-11-15: Ranking-formula RCE: interpreter fix implemented and verified, then reverted by decision back to plain `eval`; documented as issue 001 in `plan/issue.md`. See §9.
+- 2026-11-15: Middle step before 4.4/4.5: switched providers.yaml to the gomodel proxy (embedding via the `ollama_yople` upstream, LLM to `strata_toaster/iq3_xxs`), and validated the `d3:4b` decision model: it is System One-only (`/v1/systemone`, no chat completions) and gomodel cannot proxy that endpoint to ollama yet, so decisions go direct to `local-ollama`. See §9.
+- 2026-11-15: Decision-model support in code: `defaults.decision` key in providers.yaml (local-ollama/d3:4b) and `Provider.decide()` — a System One client with typed `ChoiceQuestion`/`NoulQuestion`/`ScoreQuestion` models, `DecisionAnswer` parsing, keep_alive passthrough and 8 hermetic tests. See §9.
 
 ---
 
@@ -351,3 +354,84 @@ Review of everything not yet committed (admin/reembed, BM25 migration, models, s
 Verified non-issues: search ownership filtering (`ChatGroupService.retrieve` scopes by user), reembed→worker requeue contract (`embed_memory_objects` picks up NULL-embedding events/topics/facts), migration downgrade fidelity (0002 never created the dropped GIN indexes), `Table.append_constraint(Index)` is officially supported, `k`/`q` bounds, and the formula compilation cache (bounded by chatgroup count).
 
 **Verification:** 73 unit tests pass (`just test`) — coverage includes formula evaluation (default, math helpers, boolean/conditional semantics, non-lambda rejection), hostile BM25 queries returning 200 with non-NaN scores, blank queries 422, and a custom formula accepted on chatgroup create (201). Live dev-DB checks: hostile queries return vector-only hits instead of 500s; end-to-end search unchanged with the plain `eval`. `ruff` and `mypy` clean.
+
+---
+
+### Middle step — gomodel proxy + q3 LLM (2026-11-15) — DONE
+
+Prep before 4.4/4.5: move both LLM and embedding traffic onto the gomodel proxy and swap the
+generation model to the q3 quant, so the decision/generation split can be configured purely in
+`providers.yaml`.
+
+- `providers.yaml`: new `gomodel` provider (`https://gomodel.eagal.org/v1`, key from `GOMODEL_TOKEN`). Defaults: embedding `ollama_yople/embeddinggemma-2:740m` (unchanged model, now via the proxy), LLM `strata_toaster/iq3_xxs` (instead of `gemma4:e4b`). The `overrides:` block was initially dropped (every entry duplicated the old default and would have pinned tasks to gemma), then restored per user request as the explicit per-task tuning surface — all entries set to `gomodel/strata_toaster/iq3_xxs`, i.e. identical to the default; 4.5 will split them per task. `local-ollama` stays declared for direct access / rollback.
+- The proxy's model namespace is upstream-prefixed: `ollama_yople/*` is our own ollama box (the same one `local-ollama` points at), `strata_toaster/iq3_xxs` is a model on a PC that is not directly reachable — a direct-to-ollama q3 call is impossible from here, so all q3 validation goes through gomodel.
+
+**Verification:** layer by layer —
+1. Direct ollama baseline (gemma chat, embedding) on `192.168.9.137`.
+2. Same calls through gomodel's `ollama_yople` upstream: chat answers identical, embeddings **bit-identical** (cosine 1.0, 768 dims) — the proxy is transparent.
+3. `strata_toaster/iq3_xxs` through gomodel: simple chat ~2.4s, keyword-extraction JSON task clean (~5s).
+4. Through the app's `Provider` (langchain path incl. `response_format=json_object`): embed 768d (0.4s), chat 'OK' (0.7s), `chat_json` parses (2.1s).
+`just test` still 73 passed (providers are mocked in the unit suite).
+
+### Middle step, part 2 — the d3 decision model (2026-11-15) — DONE
+
+Correcting an earlier misreading: the model to check was `d3:4b` on the yople ollama (the
+decision model), not the strata quant. Validated direct-first, then through the proxy:
+
+- `d3:4b` is **not a chat model.** `/v1/chat/completions` rejects it identically on ollama
+  and through gomodel: `"d3:4b" does not support chat`. `/api/show` reports capabilities
+  `["decision", "vision"]`, `qwen35.decision.type = vllm-d3` (Qwen3.5 4B base); the server
+  runs ollama 0.40.16.
+- It is called with **`POST /v1/systemone`** (ollama ≥ 0.35): one shared `state` (text, JSON
+  or image) plus 1–64 typed `questions`. Types: `choice` (label → probabilities),
+  `noul` (yes/no probability), `score` (2–10 ordered rubric levels → probability-weighted
+  index + confidence). Answers are probabilities/scores only — never conversational text.
+- **Direct (192.168.9.137): works.** State = the demo hiking message, 3 questions:
+  salience `score` (5-level rubric) → 1.667/4 (conf 0.21); keep `noul` → P(true) 0.19;
+  mood `choice` → positive p 0.97 (conf 0.88). Sensible on all three. 23.3s total,
+  383 input tokens, 0 output tokens (questions are scored as independent passes).
+- **Through gomodel: blocked.** `POST https://gomodel.eagal.org/v1/systemone` with
+  `ollama_yople/d3:4b` → 400: *"model is served by provider type ollama, which has no
+  System One API; /v1/systemone forwards requests natively and does not translate them to
+  other APIs"*. The claim is outdated for ollama ≥ 0.35, but it is what the proxy enforces
+  (it only knows jev / OpenRouter / Azure decision models). Until gomodel learns to forward
+  systemone to ollama upstreams, decision calls must use the `local-ollama` provider
+  directly; embedding and chat stay on gomodel.
+
+**Design impact on 4.2/4.4/4.5** (apply when implementing):
+
+1. The planned chat-task overrides (`salience`, `topic_candidate`, `fact_candidate`,
+   `event_decision` → `d3:4b`) cannot work: ChatOpenAI speaks chat completions, which d3
+   rejects. The Provider needs a System One client — a `decide(state, questions)` method
+   hitting `/v1/systemone` — with its own provider config section (provider `local-ollama`,
+   model `d3:4b` for now).
+2. Salience 0.0–1.0: a `score` question with a ~5-level rubric, normalized by levels − 1
+   (or a `noul` probability). Rubric wording to be tuned at implementation.
+3. Decision prompts become typed questions: extend-vs-new is a `choice` over
+   `{extend, new}` with criteria descriptions; create/update/skip similarly. Probabilities
+   and confidence come for free and can drive fallback thresholds.
+4. Latency: ~23s for 3 questions on the current box — each question is an independent
+   scoring pass. Batch stages should ask few questions per message and lean on keep_alive.
+
+### Middle step, part 3 — decision call support in code (2026-11-15) — DONE
+
+The plumbing 4.2/4.4/4.5 will call, landed ahead of them:
+
+- `providers.yaml` gains `defaults.decision` (new key): provider `local-ollama`, model
+  `d3:4b` — direct, because gomodel cannot forward `/v1/systemone` (see part 2).
+  `backend.llm.config` gets `DecisionDefaults` (+ legacy env fallback
+  `VISTUI_DECISION_MODEL`, default `d3:4b`).
+- `Provider.decide(state, questions, keep_alive=None)` in `backend.llm.provider`: typed
+  question models `ChoiceQuestion` / `NoulQuestion` / `ScoreQuestion` (client-side mirrors
+  of the server limits: 2–255 options, false/true criteria only, 2–10 rubric levels), a
+  `System One` HTTP client (`POST {base_url}/systemone` via httpx, provider timeout and
+  api_key_env honored), `DecisionAnswer` parsing with per-question validation, missing-answer
+  detection, HTTP/network errors surfaced as `DecisionError`, usage logging, and optional
+  `keep_alive` for batch rounds.
+- 8 hermetic tests (`tests/backend/llm/test_provider.py`): config fallback, payload shape
+  (URL, auth header, exclude_none serialization), keep_alive passthrough, empty/missing
+  answers, HTTP 400 and network errors, question model limits. 81 unit tests total.
+
+**Verification:** live end-to-end through `Provider.decide()` with the real providers.yaml
+against the box: 3 questions in 16.1s — salience `score` 1.667/4 (conf 0.21), `keep` noul
+0.26, `mood` choice positive p 0.97; matches the raw-curl validation. `ruff`/`mypy` clean.

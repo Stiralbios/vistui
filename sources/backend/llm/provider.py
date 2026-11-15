@@ -1,8 +1,10 @@
 import json
 import os
-from typing import Any
+from typing import Any, Literal
 
+import httpx
 from backend.llm.config import (
+    DecisionDefaults,
     LLMDefaults,
     ProviderConfig,
     ProviderSpec,
@@ -11,7 +13,7 @@ from backend.llm.config import (
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from loguru import logger
-from pydantic import SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 
 class LLMProviderError(Exception):
@@ -26,12 +28,75 @@ class ChatError(LLMProviderError):
     pass
 
 
+class DecisionError(LLMProviderError):
+    pass
+
+
+class ChoiceQuestion(BaseModel):
+    """System One question: pick the best-fitting option among labeled criteria."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["choice"] = "choice"
+    instructions: Any
+    criteria: dict[str, str | None] = Field(min_length=2, max_length=255)
+
+
+class NoulQuestion(BaseModel):
+    """System One question: probability of true for a yes/no instruction.
+
+    Optional per-outcome descriptions live in `criteria` under the literal keys
+    `false` and `true`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["noul"] = "noul"
+    instructions: Any
+    criteria: dict[Literal["false", "true"], str] | None = None
+
+
+class ScoreQuestion(BaseModel):
+    """System One question: score the state against ordered rubric levels.
+
+    `criteria` lists 2-10 level descriptions from the lowest (index 0) to the
+    highest; the answer's `score` is a probability-weighted average of the
+    zero-based indices, i.e. 0 .. len(criteria) - 1.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["score"] = "score"
+    instructions: Any
+    criteria: list[str] = Field(min_length=2, max_length=10)
+
+
+SystemOneQuestion = ChoiceQuestion | NoulQuestion | ScoreQuestion
+
+
+class DecisionAnswer(BaseModel):
+    """One System One answer; the fields present depend on the question type
+    (choice -> `choice`/`probabilities`, noul -> `noul`, score -> `score`/`legend`)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["choice", "noul", "score"]
+    choice: str | None = None
+    noul: float | None = None
+    score: float | None = None
+    legend: dict[str, str] | None = None
+    probabilities: dict[str, float] | None = None
+    confidence: float | None = None
+
+
 class Provider:
     """LangChain-based async provider wrapper used by the batch worker.
 
     Provider and model selection is driven by ``providers.yaml`` (see
     ``documentations/architecture/llm-provider.md``). The ``task`` argument to
-    ``chat`` selects the per-task override defined in that file.
+    ``chat`` selects the per-task override defined in that file. Decision models
+    (``decide``) are System One models called through ollama's ``/v1/systemone``
+    endpoint and configured under ``defaults.decision``.
     """
 
     def __init__(self, config: ProviderConfig | None = None) -> None:
@@ -174,3 +239,72 @@ class Provider:
         except json.JSONDecodeError as exc:
             logger.error(f"Failed to parse LLM JSON response: {content}")
             raise ChatError(f"Invalid JSON from chat model: {exc}") from exc
+
+    async def decide(
+        self,
+        state: Any,
+        questions: dict[str, SystemOneQuestion],
+        keep_alive: str | float | None = None,
+    ) -> dict[str, DecisionAnswer]:
+        """Ask the configured decision model typed questions about a shared state.
+
+        Decision models (e.g. ``d3:4b``) are System One models: they answer with
+        probabilities and rubric scores on ollama's ``POST /v1/systemone`` endpoint
+        and have no chat-completions API. ``state`` is any JSON-serializable text,
+        object or array shared by all ``questions`` (keyed by name, 1-64 of them);
+        answers come back keyed by the same names. ``keep_alive`` optionally keeps
+        the model loaded between batch requests (duration string or seconds).
+        """
+        if not questions:
+            raise DecisionError("decision requests need at least one question")
+
+        decision: DecisionDefaults = self.config.defaults.decision
+        spec = self.config.providers[decision.provider]
+        payload: dict[str, Any] = {
+            "model": decision.model,
+            "state": state,
+            "questions": {name: question.model_dump(exclude_none=True) for name, question in questions.items()},
+        }
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+
+        response = await self._systemone_request(spec, payload)
+        raw_answers = response.get("answers")
+        if not isinstance(raw_answers, dict):
+            raise DecisionError("System One response has no answers object")
+        missing = set(questions) - set(raw_answers)
+        if missing:
+            raise DecisionError(f"System One response is missing answers for: {sorted(missing)}")
+
+        answers: dict[str, DecisionAnswer] = {}
+        for name, raw in raw_answers.items():
+            try:
+                answers[name] = DecisionAnswer.model_validate(raw)
+            except ValidationError as exc:
+                raise DecisionError(f"Malformed System One answer for question {name!r}: {exc}") from exc
+
+        usage = response.get("usage") or {}
+        logger.debug(
+            f"System One call for {len(questions)} question(s) on model {decision.model}: "
+            f"input_tokens={usage.get('input_tokens')} output_tokens={usage.get('output_tokens')}"
+        )
+        return answers
+
+    async def _systemone_request(self, spec: ProviderSpec, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST one System One request and return the parsed JSON response."""
+        try:
+            async with httpx.AsyncClient(timeout=spec.timeout_seconds) as client:
+                response = await client.post(
+                    f"{spec.base_url}/systemone",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self._api_key(spec).get_secret_value()}"},
+                )
+        except httpx.HTTPError as exc:
+            logger.exception("System One request failed")
+            raise DecisionError(f"System One request failed: {exc}") from exc
+        if response.status_code != 200:
+            raise DecisionError(f"System One call failed with HTTP {response.status_code}: {response.text[:300]}")
+        data = response.json()
+        if not isinstance(data, dict):
+            raise DecisionError("System One response was not a JSON object")
+        return data

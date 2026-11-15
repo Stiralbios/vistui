@@ -50,6 +50,9 @@ defaults:
     model: "gpt-4o-mini"
     temperature: 0.3
     max_tokens: 2048
+  decision:
+    provider: "local-ollama"
+    model: "d3:4b"
 
 overrides:
   salience:
@@ -93,8 +96,25 @@ overrides:
 | `OLLAMA_API_KEY` | API key for the `local-ollama` provider. |
 | `REMOTE_API_KEY` | API key for the `remote-llm` provider. |
 | `VISTUI_PROVIDERS_FILE` | Path to `providers.yaml` (default `./providers.yaml`). |
+| `VISTUI_DECISION_MODEL` | Decision model for the legacy env fallback (`d3:4b`). |
 
 If `api_key_env` is not set, the provider is used without authentication (common for local Ollama).
+
+### Current deployment
+
+The dev deployment points both defaults at the **gomodel proxy** (`https://gomodel.eagal.org/v1`,
+auth via `GOMODEL_TOKEN`), an OpenAI-compatible proxy in front of several ollama upstreams.
+Model ids are prefixed by upstream: `ollama_yople/*` is our own ollama box (also reachable
+directly via `local-ollama`), `strata_toaster/iq3_xxs` is a small quantized model hosted on
+another PC that is *only* reachable through the proxy. The embedding goes through the same
+proxy (`ollama_yople/embeddinggemma-2:740m`) — verified bit-identical to calling the box
+directly (cosine 1.0), so switching the default between the two routes is safe.
+
+The `d3:4b` decision model is the one thing that must be called **directly** (`local-ollama`):
+it is a System One model (`POST /v1/systemone`, typed `choice`/`noul`/`score` questions, no
+chat completions — ollama rejects chat for it), and gomodel does not forward `/v1/systemone`
+to ollama upstreams yet (it answers that "provider type ollama has no System One API",
+outdated for ollama ≥ 0.35).
 
 ## Provider abstraction
 
@@ -104,6 +124,7 @@ The application wraps the OpenAI SDK with a thin adapter:
 class Provider:
     def embed(self, texts: list[str]) -> list[list[float]]: ...
     def chat(self, messages: list[dict], task: str) -> str: ...
+    async def decide(self, state, questions: dict[str, SystemOneQuestion], keep_alive=None) -> dict[str, DecisionAnswer]: ...
 ```
 
 - `task` selects the override config (e.g., `salience`, `keywords`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`).
@@ -136,6 +157,23 @@ class Provider:
 | `fact_candidate` | existing fact summaries, new message, `max_facts_per_message`. |
 | `fact_update` | existing fact, new message, recent fact-linked messages. |
 
+## Decision call semantics
+
+Decision models (System One, e.g. `d3:4b`) answer **typed questions** on ollama's
+`POST /v1/systemone` endpoint; they have no chat-completions API and never produce
+conversational text.
+
+- `decide(state, questions)` sends one JSON-serializable `state` shared by all questions
+  (1-64, keyed by name) using the `defaults.decision` provider/model.
+- Question types: `ChoiceQuestion` (labeled options -> best label + probabilities),
+  `NoulQuestion` (yes/no -> probability of true) and `ScoreQuestion` (2-10 ordered rubric
+  levels -> probability-weighted index plus per-level probabilities and confidence).
+- Answers come back as `DecisionAnswer` objects keyed by the question names; answers never
+  feed later questions (each is scored independently).
+- `keep_alive` keeps the model loaded between batch requests (duration string or seconds).
+- Routing caveat: gomodel does not forward `/v1/systemone` to ollama upstreams, so the
+  decision provider must be a directly reachable ollama (`local-ollama` in the dev config).
+
 ## Separation of concerns
 
 | Concern | Owned by |
@@ -161,3 +199,4 @@ class Provider:
 
 - 2026-07-11: Initial LLM provider design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: split `fact` task into `fact_candidate` and `fact_update`, split `topic` task into `topic_candidate` and `topic_update`.
+- 2026-11-15: Added `defaults.decision` and `Provider.decide()` for System One decision models (`/v1/systemone`): typed `choice`/`noul`/`score` questions, probability answers, direct-ollama routing only.

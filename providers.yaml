@@ -3,41 +3,56 @@ providers:
     base_url: "http://192.168.9.137:11434/v1"
     api_key_env: "OLLAMA_API_KEY"
     timeout_seconds: 120
+  # gomodel is an OpenAI-compatible proxy in front of several ollama upstreams:
+  #   - "ollama_yople/*": our own ollama box (same host as local-ollama, reached via the proxy)
+  #   - "strata_toaster/*": the toaster PC on another network, not reachable directly
+  # Requires GOMODEL_TOKEN in the environment.
+  gomodel:
+    base_url: "https://gomodel.eagal.org/v1"
+    api_key_env: "GOMODEL_TOKEN"
+    timeout_seconds: 120
 
 defaults:
   embedding:
-    provider: "local-ollama"
-    model: "embeddinggemma-2:740m"
+    provider: "gomodel"
+    model: "ollama_yople/embeddinggemma-2:740m"
     dimensions: 768
   llm:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
     temperature: 0.0
     max_tokens: 4096
+  # Decision models answer typed questions on ollama's System One endpoint
+  # (/v1/systemone); they reject chat completions. gomodel does not forward that
+  # endpoint to ollama upstreams, so the decision model goes direct.
+  decision:
+    provider: "local-ollama"
+    model: "d3:4b"
 
+# Per-task chat overrides: the explicit tuning surface for individual pipeline tasks.
+# They currently duplicate defaults.llm; 4.5 will split them (decision vs generation).
 overrides:
   salience:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
   keywords:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
   memory_ratio:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
   event:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
   topic_candidate:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
   topic_update:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
   fact_candidate:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
   fact_update:
-    provider: "local-ollama"
-    model: "gemma4:e4b"
-
+    provider: "gomodel"
+    model: "strata_toaster/iq3_xxs"
