@@ -1,5 +1,20 @@
 # docker compose -f deployments/docker-compose.dev.yml up -d
 services:
+  # Web UI to browse the databases: http://localhost:8081
+  # Login: system "PostgreSQL", server "vistui_postgres" (dev) or "vistui_postgres_test",
+  # username/password/database "vistui". Vector columns render as text arrays.
+  vistui_adminer:
+    image: adminer:4.8.1
+    container_name: vistui_adminer
+    restart: on-failure
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: vistui_postgres
+    depends_on:
+      - vistui_postgres
+      - vistui_postgres_test
+
   vistui_postgres:
     image: paradedb/paradedb:pg18
     container_name: vistui_postgres

@@ -10,7 +10,7 @@ from typing import Any, Protocol, TypeVar
 
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -87,13 +87,17 @@ class BatchQueries:
     @staticmethod
     async def count_waiting_messages(session: AsyncSession) -> int:
         """Count messages that still have at least one waiting pipeline flag."""
-        stmt = select(MessageDO).where(
-            or_(
-                MessageDO.processing_state["embedding"].astext == ProcessingStatus.WAITING,
-                MessageDO.processing_state["event"].astext == ProcessingStatus.WAITING,
-                MessageDO.processing_state["topic"].astext == ProcessingStatus.WAITING,
-                MessageDO.processing_state["fact"].astext == ProcessingStatus.WAITING,
+        stmt = (
+            select(func.count())
+            .select_from(MessageDO)
+            .where(
+                or_(
+                    MessageDO.processing_state["embedding"].astext == ProcessingStatus.WAITING,
+                    MessageDO.processing_state["event"].astext == ProcessingStatus.WAITING,
+                    MessageDO.processing_state["topic"].astext == ProcessingStatus.WAITING,
+                    MessageDO.processing_state["fact"].astext == ProcessingStatus.WAITING,
+                )
             )
         )
         res = await session.execute(stmt)
-        return len(list(res.scalars().all()))
+        return res.scalar_one()

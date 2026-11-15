@@ -24,6 +24,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def _extract_actions(response: object, plural_key: str) -> list[dict]:
+    """Normalize the LLM's JSON answer into a list of action dicts.
+
+    Models answering in JSON-object mode produce several valid shapes: a bare array,
+    an object wrapping the actions under "actions" or the pipeline-specific plural key
+    ("topics"/"facts"), or a single bare action object — all must be applied.
+    """
+    if isinstance(response, list):
+        return [action for action in response if isinstance(action, dict)]
+    if isinstance(response, dict):
+        for key in ("actions", plural_key):
+            actions = response.get(key)
+            if isinstance(actions, list):
+                return [action for action in actions if isinstance(action, dict)]
+        if isinstance(response.get("action"), str):
+            return [response]
+    return []
+
+
 class EventPipeline:
     """Group contiguous messages of a chat into Events using the chat model.
 
@@ -63,7 +82,6 @@ class EventPipeline:
                     }
                 ],
                 task="event",
-                temperature=0.2,
             )
 
             groups = response.get("events", [])
@@ -144,15 +162,9 @@ class TopicPipeline:
                     }
                 ],
                 task="topic_candidate",
-                temperature=0.2,
             )
 
-            actions: list[dict] = []
-            if isinstance(response, list):
-                actions = response
-            elif isinstance(response, dict):
-                # The LLM may answer with a bare list or wrap it in an "actions"/"topics" key.
-                actions = response.get("actions", []) or response.get("topics", []) or []
+            actions = _extract_actions(response, "topics")
             for action in actions:
                 await cls._apply_action(session, chatgroup_id, message, action, existing_topics)
 
@@ -260,15 +272,9 @@ class FactPipeline:
                     }
                 ],
                 task="fact_candidate",
-                temperature=0.2,
             )
 
-            actions: list[dict] = []
-            if isinstance(response, list):
-                actions = response
-            elif isinstance(response, dict):
-                # The LLM may answer with a bare list or wrap it in an "actions"/"facts" key.
-                actions = response.get("actions", []) or response.get("facts", []) or []
+            actions = _extract_actions(response, "facts")
             for action in actions:
                 await cls._apply_action(session, chatgroup_id, message, action, existing_facts)
 

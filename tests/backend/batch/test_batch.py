@@ -19,19 +19,7 @@ from backend.seeders import seed_demo_chat
 from backend.topic.models import TopicDO, TopicMessageLinkDO
 from backend.user.models import UserDO
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from sqlalchemy import select, text
-
-
-@pytest.fixture(autouse=True)
-async def clean_memory_tables():
-    async with get_async_sessionmaker()() as session, session.begin():
-        await session.execute(
-            text(
-                "TRUNCATE TABLE chatgroup, chat, message, event, topic, fact, "
-                "event_message_links, topic_message_links, fact_message_links "
-                "RESTART IDENTITY CASCADE"
-            )
-        )
+from sqlalchemy import select
 
 
 def _fake_embeddings():
@@ -52,7 +40,9 @@ def _fake_embeddings():
     return FakeEmbeddings
 
 
-def _fake_chat_model():
+def _fake_chat_model(
+    topic_content: str = '{"actions": [{"action": "create", "summary": "Demo topic"}]}',
+):
     """Return a LangChain ChatOpenAI whose ainvoke returns deterministic JSON."""
 
     class FakeChatModel(ChatOpenAI):
@@ -68,7 +58,7 @@ def _fake_chat_model():
             if "events" in prompt:
                 content = '{"events": [{"summary": "Demo event", "message_ids": []}]}'
             elif "topics" in prompt:
-                content = '{"actions": [{"action": "create", "summary": "Demo topic"}]}'
+                content = topic_content
             elif "facts" in prompt:
                 content = '{"actions": [{"action": "create", "summary": "Demo fact"}]}'
             else:
@@ -225,6 +215,37 @@ async def test_topic_pipeline():
             .all()
         )
         assert len(links) == 1
+
+
+async def test_topic_pipeline_single_action_response():
+    """A bare single-action JSON object (no "actions" wrapper) must be applied, not dropped."""
+    with (
+        patch("backend.llm.provider.OpenAIEmbeddings", _fake_embeddings()),
+        patch(
+            "backend.llm.provider.ChatOpenAI",
+            _fake_chat_model(topic_content='{"action": "create", "summary": "Solo topic"}'),
+        ),
+    ):
+        async with get_async_sessionmaker()() as session, session.begin():
+            chatgroup, chat = await _make_test_chat(session)
+            msg = await _add_message(session, chat.id, "Solo action message")
+            msg.embedding = [0.0] * 768
+
+        processed = await TopicPipeline.run_round()
+        assert processed == 1
+
+        async with get_async_sessionmaker()() as session, session.begin():
+            topics = list(
+                (await session.execute(select(TopicDO).where(TopicDO.chatgroup_id == chatgroup.id))).scalars().all()
+            )
+            assert len(topics) == 1
+            assert topics[0].full_text == "Solo topic"
+            links = list(
+                (await session.execute(select(TopicMessageLinkDO).where(TopicMessageLinkDO.topic_id == topics[0].id)))
+                .scalars()
+                .all()
+            )
+            assert len(links) == 1
 
 
 @pytest.mark.usefixtures("fake_langchain_client")

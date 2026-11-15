@@ -45,35 +45,32 @@ class BatchWorker:
             async with get_async_sessionmaker()() as session, session.begin():
                 batch_status.queue_depth = await BatchQueries.count_waiting_messages(session)
 
-            # (name used for status/logs, processing_state key to peek/mark, async callable)
-            pipelines: list[tuple[str, str, Callable[..., Awaitable[Any]]]] = [
-                ("embedding", "embedding", embed_messages),
-                ("memory_embedding", "memory_embedding", embed_memory_objects),
-                ("event", "event", EventPipeline.run_round),
-                ("topic", "topic", TopicPipeline.run_round),
-                ("fact", "fact", FactPipeline.run_round),
+            # (name used for status/logs and as processing_state key, async callable)
+            pipelines: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
+                ("embedding", embed_messages),
+                ("memory_embedding", embed_memory_objects),
+                ("event", EventPipeline.run_round),
+                ("topic", TopicPipeline.run_round),
+                ("fact", FactPipeline.run_round),
             ]
 
-            for pipeline_name, state_key, pipeline in pipelines:
+            for pipeline_name, pipeline in pipelines:
                 if self.should_stop:
                     logger.info(f"Batch worker stopping before pipeline {pipeline_name}")
                     break
 
                 batch_status.current_pipeline = pipeline_name
 
-                target_message_id = await self._peek_message_id(state_key)
+                target_message_id = await self._peek_message_id(pipeline_name)
                 batch_status.current_message_id = target_message_id
 
                 try:
-                    if pipeline_name in ("embedding", "memory_embedding"):
-                        await pipeline(provider=provider)
-                    else:
-                        await pipeline(provider=provider)
+                    await pipeline(provider=provider)
                 except Exception as exc:
                     batch_status.recent_failures += 1
                     logger.exception(f"Pipeline {pipeline_name} failed: {exc}")
                     if target_message_id:
-                        await self._mark_failed(target_message_id, state_key)
+                        await self._mark_failed(target_message_id, pipeline_name)
 
             async with get_async_sessionmaker()() as session, session.begin():
                 batch_status.queue_depth = await BatchQueries.count_waiting_messages(session)

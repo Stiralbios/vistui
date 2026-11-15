@@ -39,7 +39,7 @@ class LLMDefaults(BaseModel):
 
     provider: str
     model: str
-    temperature: float = 0.2
+    temperature: float = 0.0
     max_tokens: int = 2048
 
 
@@ -94,7 +94,7 @@ class ProviderConfig(BaseModel):
                 llm=LLMDefaults(
                     provider="default",
                     model=settings.VISTUI_CHAT_MODEL,
-                    temperature=0.2,
+                    temperature=0.0,
                     max_tokens=2048,
                 ),
             ),

@@ -43,8 +43,11 @@ async def create_default_user():
     logger.info(f"Default user created successfully with email: {email}")
 
 
+# The first message is deliberately rich in personal facts and discussion topics, so the
+# batch pipelines reliably create facts and topics from the earliest processing rounds
+# (relied on by tests/backend/batch/test_batch_integration.py).
 _DEMO_MESSAGES = [
-    (MessageRole.USER, "Hi, I'd like to plan a trip to Japan next spring."),
+    (MessageRole.USER, "Hi! I'm Camille from Lyon. I love hiking and photography, and I'm planning a trip to Japan."),
     (MessageRole.ASSISTANT, "That sounds exciting! What cities are you considering?"),
     (MessageRole.USER, "Tokyo and Kyoto for sure, maybe Osaka too."),
     (MessageRole.ASSISTANT, "Great choices. How long are you planning to stay?"),
