@@ -94,3 +94,7 @@ requests.get(f"{base}/chatgroups", ...)  # any search on the group evaluates the
 ## Issue 002 — Search don't have token limit
 
 Search should return the x best result. Limited by the amount of token the client want (a parameter)
++ memory ratio
+
+
+## Issue 003 — Key embedding and sallience in message processing state: do we really need them ?
