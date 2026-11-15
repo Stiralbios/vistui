@@ -13,6 +13,13 @@ class TriggerBatchResponse(BaseModel):
     status: str
 
 
+class ReembedResponse(BaseModel):
+    messages: int
+    events: int
+    topics: int
+    facts: int
+
+
 class BatchStatusResponse(BaseModel):
     running: bool
     current_pipeline: str | None

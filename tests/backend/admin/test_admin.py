@@ -4,8 +4,13 @@ from unittest.mock import patch
 
 import pytest
 from backend.database import get_async_sessionmaker
+from backend.event.models import EventDO
+from backend.fact.models import FactDO
+from backend.message.constants import ProcessingStatus
+from backend.message.models import MessageDO
+from backend.topic.models import TopicDO
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 
 def _fake_embeddings():
@@ -92,3 +97,29 @@ async def test_batch_trigger_endpoint(client):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_reembed_endpoint(client):
+    """After consolidation, reembed must null every vector and requeue the embedding
+    stage so the worker recomputes everything with the (new) embedding model."""
+    await client.post("/admin/seed/demo")
+    assert (await client.post("/admin/batch/trigger")).status_code == 200
+
+    response = await client.post("/admin/reembed")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["messages"] == 30
+    assert data["events"] >= 1
+    assert data["topics"] >= 1
+    assert data["facts"] >= 1
+
+    async with get_async_sessionmaker()() as session:
+        messages = list((await session.execute(select(MessageDO))).scalars().all())
+        assert len(messages) == 30
+        for message in messages:
+            assert message.embedding is None
+            assert message.processing_state["embedding"] == ProcessingStatus.WAITING
+        for model in (EventDO, TopicDO, FactDO):
+            objects = list((await session.execute(select(model))).scalars().all())
+            assert all(obj.embedding is None for obj in objects)

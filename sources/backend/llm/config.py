@@ -12,7 +12,7 @@ class LLMSettings(BaseSettings):
     VISTUI_PROVIDERS_FILE: str = "./providers.yaml"
     VISTUI_LLM_BASE_URL: str = "http://192.168.9.137:11434/v1"
     VISTUI_LLM_API_KEY: SecretStr | None = None
-    VISTUI_EMBEDDING_MODEL: str = "qwen3-embedding:8b"
+    VISTUI_EMBEDDING_MODEL: str = "embeddinggemma-2:740m"
     VISTUI_CHAT_MODEL: str = "gemma4:e4b"
     VISTUI_EMBEDDING_DIMENSIONS: int = 768
     VISTUI_LLM_TIMEOUT_SECONDS: int = 120

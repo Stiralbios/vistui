@@ -1,11 +1,19 @@
-from backend.admin.schemas import BatchStatusResponse, SeedDemoResponse, TriggerBatchResponse
+import json
+
+from backend.admin.schemas import BatchStatusResponse, ReembedResponse, SeedDemoResponse, TriggerBatchResponse
 from backend.batch import BatchWorker, batch_status
 from backend.batch.queries import BatchQueries
 from backend.chat.models import ChatDO
 from backend.database import get_async_sessionmaker
+from backend.event.models import EventDO
+from backend.fact.models import FactDO
+from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
 from backend.seeders import seed_demo_chat
+from backend.topic.models import TopicDO
 from fastapi import APIRouter
+from sqlalchemy import Text, cast, func, literal, update
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -21,6 +29,30 @@ async def trigger_batch() -> TriggerBatchResponse:
     worker = BatchWorker()
     await worker.run_round()
     return TriggerBatchResponse(status="ok")
+
+
+@router.post("/reembed", response_model=ReembedResponse)
+async def reembed() -> ReembedResponse:
+    """Null all embeddings and requeue them. Used after switching embedding models:
+    vectors from different models are not comparable, so everything must be recomputed
+    by the batch worker."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        messages = (
+            await session.execute(
+                update(MessageDO).values(
+                    embedding=None,
+                    processing_state=func.jsonb_set(
+                        MessageDO.processing_state,
+                        cast(literal("{embedding}"), ARRAY(Text)),
+                        cast(literal(json.dumps(ProcessingStatus.WAITING)), JSONB),
+                    ),
+                )
+            )
+        ).rowcount
+        counts = {"messages": messages}
+        for key, model in (("events", EventDO), ("topics", TopicDO), ("facts", FactDO)):
+            counts[key] = (await session.execute(update(model).values(embedding=None))).rowcount
+    return ReembedResponse(**counts)
 
 
 @router.get("/batch/status", response_model=BatchStatusResponse)
