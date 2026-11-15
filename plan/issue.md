@@ -97,13 +97,25 @@ Search should return the x best result. Limited by the amount of token the clien
 + memory ratio
 
 
-## Issue 003 — Key embedding and sallience in message processing state: do we really need them ?
+## Issue 003 — Key embedding and salience in message processing state: do we really need them ?
 
-State after plan 4.4 (2026-11-15): both flags drive the state machine, not the columns.
-`embedding`/`salience` = done is the gate for event/topic/fact consolidation (the worker
-marks them done in the same round before consolidating), and `count_waiting_messages`
-uses them for the queue depth, so removing the keys would stall consolidation and the
-admin status. The columns themselves are independent: `salience_score` stays NULL for
-not-yet-scored rows and for chatgroups with `use_salience` false/null (neutral 1.0 at
-scoring time), and `embedding` NULL just excludes a row from the vector channel. See
-`plan/plan4.md` §9.
+Resolution (2026-11-15): no, they are redundant — same conclusion as for memory
+objects. Events/topics/facts already show the model: their queue marker IS the NULL
+column (`get_memory_objects_without_salience` selects `salience_score IS NULL`, and
+the stage simply skips objects of opted-out chatgroups, which keep their NULL score
+by design — no flag is needed to say "done"). Messages can work the same way:
+
+- `embedding IS NULL` → waiting for the embedding stage; a failure leaves the column
+  NULL, so retries come for free (`retry_count` / `last_failure_at` already carry the
+  failure history).
+- `embedding IS NOT NULL AND salience_score IS NULL` → waiting for the salience stage;
+  opted-out chatgroups keep NULL forever and are skipped each round, exactly like
+  memory objects.
+- The consolidation gate becomes a column condition instead of
+  `processing_state["salience"] = done`: a message is eligible when
+  `embedding IS NOT NULL AND (salience_score IS NOT NULL OR the chatgroup opts out)`.
+- `count_waiting_messages` derives the queue depth from the same composite conditions.
+
+As built today the two keys still drive that gate, the queue count and the admin
+status, so this is a recorded future simplification — not implemented for now
+(user decision 2026-11-15). See `plan/plan4.md` §9 for the as-built state machine.
