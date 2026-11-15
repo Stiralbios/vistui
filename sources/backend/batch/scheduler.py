@@ -39,11 +39,14 @@ def get_scheduler() -> AsyncIOScheduler:
 
 
 def start_scheduler() -> None:
-    """Register the periodic batch round (if not already registered) and start the scheduler.
-    Safe to call on every app startup."""
+    """Register the periodic batch round (if not already registered) and start the
+    scheduler. An interval of 0 disables background rounds entirely (used by
+    `just test-integration`, which triggers rounds explicitly through the admin API):
+    any job persisted from an earlier run is removed. Safe to call on every app
+    startup."""
     scheduler = get_scheduler()
     interval = AppSettings().VISTUI_BATCH_INTERVAL_SECONDS
-    if scheduler.get_job("batch_round") is None:
+    if interval > 0:
         scheduler.add_job(
             _run_worker_round,
             "interval",
@@ -52,6 +55,9 @@ def start_scheduler() -> None:
             replace_existing=True,
         )
         logger.info(f"Scheduled batch worker every {interval} seconds")
+    elif scheduler.get_job("batch_round") is not None:
+        scheduler.remove_job("batch_round")
+        logger.info("Batch worker scheduling disabled (VISTUI_BATCH_INTERVAL_SECONDS=0)")
     scheduler.start()
 
 

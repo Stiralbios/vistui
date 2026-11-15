@@ -285,10 +285,10 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
 2. A ChatGroup must always have at least one Chat (the auto-created one if necessary).
 3. Message `prev_message_id` and `next_message_id` must be consistent within a Chat.
 4. `role` must be one of `system`, `user`, `assistant`.
-5. `salience_score` must be in `[0.0, 1.0]`.
-6. `ranking_formula` must be valid Python lambda syntax accepted by `asteval`.
-7. Messages must have `embedding` and `salience_score` before they are eligible for event/topic/fact consolidation.
-8. Events, Topics, and Facts with `null` embedding or `null` salience_score are excluded from retrieval until the missing value is regenerated.
+5. `salience_score` must be in `[0.0, 1.0]` when set; it is `null` until the salience pipeline scores the row (and stays `null` for chatgroups with `use_salience` false/null, which opt out).
+6. `ranking_formula` must be a Python lambda expression over `(vector_score, bm25_score, salience, linked_count)`.
+7. Messages must have `embedding` and `salience_score` flags `done` before they are eligible for event/topic/fact consolidation (opted-out chatgroups mark the flag done without a score).
+8. A `null` `salience_score` does not exclude a row from retrieval: the ranking formula gets the neutral 1.0. A `null` embedding excludes the row from the vector channel only (BM25 still finds it).
 
 ## Open questions
 

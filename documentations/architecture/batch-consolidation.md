@@ -85,15 +85,31 @@ If an Event, Topic, or Fact has `embedding = null`, it is also eligible for this
 
 ### Prerequisite: salience pipeline
 
-**Scope:** per Message.
+**Scope:** batch (up to 10 messages per round).
 
-1. Select the oldest message with `salience = waiting` or `salience_score = null`.
-2. Send the message to the salience LLM prompt.
-3. Parse and validate the score in `[0, 1]`.
-4. Store the salience score.
-5. Mark `salience = done`.
+Salience is scored by the **decision model** (an ollama System One model such as
+`d3:4b`, see [llm-provider.md](llm-provider.md)), not by a chat completion:
 
-If an Event, Topic, or Fact has `salience_score = null`, it is also eligible for this pipeline.
+1. Select the oldest messages with `salience = waiting` (up to 10 per round, oldest
+   first), grouped by chatgroup.
+2. For each chatgroup, score the group's messages in one `decide()` call: the shared
+   state carries the chatgroup description plus each message (id, role, text), and one
+   `score` question per message is asked against a fixed 5-level rubric (trivial →
+   critical), keyed by the message id. Calls are chunked to at most 5 questions each
+   because every question is scored against the whole state, so latency grows
+   superlinearly with the batch size.
+3. Normalize the probability-weighted rubric index to `[0, 1]` (divide by the number
+   of rubric levels minus one) and store it as `salience_score`.
+4. Mark `salience = done`.
+
+ChatGroups with `use_salience` false or null opt out: their messages only get the flag
+marked done, `salience_score` stays NULL (nothing is fabricated), and the search
+formula passes the neutral salience (1.0) for them.
+
+Events, Topics, and Facts with `salience_score = null` are scored the same way by the
+**memory salience stage**: one `decide()` call per model (events, topics, facts) per
+chatgroup, with the object's `full_text` as the state entry (up to 32 objects per
+round). Objects of opted-out chatgroups keep their NULL score.
 
 ### Event pipeline
 
@@ -181,14 +197,14 @@ A fact is rewritten in place when the underlying truth changes (e.g., "Mom is si
 
 The worker operates in rounds:
 
-1. Pick the oldest waiting message across all Chats and all ChatGroups, regardless of pipeline.
-2. Within that message, run the pipelines in order:
-   1. `embedding` and `salience` prerequisites first if not done.
-   2. Then `event`, `topic`, `fact` consolidation in that order. Each step is a separate sub-task.
-3. Messages are processed one by one in chronological order, not ChatGroup by ChatGroup.
-4. Commit results and state changes after each sub-task.
-5. Check `should_stop`. If true, exit the round.
-6. Repeat.
+1. Run the batch stages once, each in its own transaction: `embed_messages` (up to 32
+   messages), `embed_memory_objects` (up to 32 objects), the salience round (up to 10
+   messages), and the memory salience stage (up to 32 objects).
+2. Then run the consolidation pipelines in order: `event`, `topic`, `fact`. Each step
+   is a separate sub-task with its own transaction.
+3. Commit results and state changes after each sub-task.
+4. Check `should_stop`. If true, exit the round.
+5. Repeat.
 
 This design ensures that:
 
@@ -216,6 +232,7 @@ This design ensures that:
 | Scenario | Behavior |
 |----------|----------|
 | LLM call fails | Mark sub-task `failed`, retry later. |
+| Decision call fails or returns a malformed answer | The salience stage's transaction rolls back; the messages stay `waiting` and are retried next round. |
 | LLM returns invalid JSON | Mark `failed`, retry later with structured-repair note. |
 | Embedding fails after LLM succeeds | Save the consolidated object without embedding, mark `failed`, retry embedding later. |
 | Server restarts mid-task | In-flight task is lost; state remains `processing` or `failed` and is retried on startup. |
@@ -260,3 +277,5 @@ Status response:
 
 - 2026-07-11: Initial batch consolidation design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: added embedding/salience as prerequisite batch pipelines, sequential per-message event→topic→fact ordering, event LLM can return multiple events, `fact_candidate` can create new facts, `fact_update` only updates existing facts.
+
+- 2026-11-15: Salience is now scored by the decision model (`d3:4b` via System One, plan 4.4): batched `decide()` calls with a 5-level rubric for messages and memory objects, opted-out chatgroups keep `salience_score` NULL with neutral salience at search time, and the documented embedding+salience-done gate for consolidation is enforced in the queries.

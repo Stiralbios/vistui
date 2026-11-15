@@ -4,7 +4,6 @@ from typing import Any, Literal
 
 import httpx
 from backend.llm.config import (
-    DecisionDefaults,
     LLMDefaults,
     ProviderConfig,
     ProviderSpec,
@@ -244,6 +243,7 @@ class Provider:
         self,
         state: Any,
         questions: dict[str, SystemOneQuestion],
+        task: str | None = None,
         keep_alive: str | float | None = None,
     ) -> dict[str, DecisionAnswer]:
         """Ask the configured decision model typed questions about a shared state.
@@ -252,16 +252,17 @@ class Provider:
         probabilities and rubric scores on ollama's ``POST /v1/systemone`` endpoint
         and have no chat-completions API. ``state`` is any JSON-serializable text,
         object or array shared by all ``questions`` (keyed by name, 1-64 of them);
-        answers come back keyed by the same names. ``keep_alive`` optionally keeps
-        the model loaded between batch requests (duration string or seconds).
+        answers come back keyed by the same names. ``task`` optionally selects a
+        per-task override (provider/model) the same way chat tasks do, falling back
+        to ``defaults.decision``. ``keep_alive`` optionally keeps the model loaded
+        between batch requests (duration string or seconds).
         """
         if not questions:
             raise DecisionError("decision requests need at least one question")
 
-        decision: DecisionDefaults = self.config.defaults.decision
-        spec = self.config.providers[decision.provider]
+        spec, model = self._resolve_decision_config(task)
         payload: dict[str, Any] = {
-            "model": decision.model,
+            "model": model,
             "state": state,
             "questions": {name: question.model_dump(exclude_none=True) for name, question in questions.items()},
         }
@@ -285,10 +286,21 @@ class Provider:
 
         usage = response.get("usage") or {}
         logger.debug(
-            f"System One call for {len(questions)} question(s) on model {decision.model}: "
+            f"System One call for {len(questions)} question(s) on model {model}: "
             f"input_tokens={usage.get('input_tokens')} output_tokens={usage.get('output_tokens')}"
         )
         return answers
+
+    def _resolve_decision_config(self, task: str | None) -> tuple[ProviderSpec, str]:
+        """Resolve the provider spec and model for a decision call: the per-task
+        override when one exists (same overrides map as chat tasks), else
+        ``defaults.decision``."""
+        decision = self.config.defaults.decision
+        provider_name, model = decision.provider, decision.model
+        if task is not None and (override := self.config.overrides.get(task)) is not None:
+            provider_name = override.provider or provider_name
+            model = override.model or model
+        return self.config.providers[provider_name], model
 
     async def _systemone_request(self, spec: ProviderSpec, payload: dict[str, Any]) -> dict[str, Any]:
         """POST one System One request and return the parsed JSON response."""

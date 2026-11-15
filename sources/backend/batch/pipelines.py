@@ -104,7 +104,6 @@ class EventPipeline:
                     full_text=summary,
                     start_at=start_at,
                     end_at=end_at,
-                    salience_score=0.5,
                 )
                 session.add(event)
                 await session.flush()
@@ -218,7 +217,6 @@ class TopicPipeline:
                 full_text=action.get("summary", message.full_text),
                 start_at=message.created_at,
                 last_edited_at=now,
-                salience_score=0.5,
             )
             session.add(topic)
             await session.flush()
@@ -234,6 +232,7 @@ class TopicPipeline:
                 topic.full_text = action.get("summary", topic.full_text)
                 topic.last_edited_at = now
                 topic.embedding = None
+                topic.salience_score = None
                 session.add(TopicMessageLinkDO(topic_id=topic.id, message_id=message.id))
 
 
@@ -329,7 +328,6 @@ class FactPipeline:
                 full_text=action.get("summary", message.full_text),
                 start_at=message.created_at,
                 last_edited_at=now,
-                salience_score=0.5,
             )
             session.add(fact)
             await session.flush()
@@ -345,4 +343,5 @@ class FactPipeline:
                 fact.full_text = action.get("summary", fact.full_text)
                 fact.last_edited_at = now
                 fact.embedding = None
+                fact.salience_score = None
                 session.add(FactMessageLinkDO(fact_id=fact.id, message_id=message.id))

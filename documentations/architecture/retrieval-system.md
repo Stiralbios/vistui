@@ -123,26 +123,30 @@ For each candidate, compute a final relevance score using the ChatGroup's config
 
 ```python
 lambda vector_score, bm25_score, salience, linked_count: max(
-    vector_score * salience * linked_count,
-    bm25_score * salience * linked_count
-)
+    vector_score, bm25_score
+) * salience * link_weight(linked_count)
 ```
 
 ### Inputs to the formula
 
 | Variable | Meaning |
 |----------|---------|
-| `vector_score` | Normalized vector similarity score for the candidate. |
-| `bm25_score` | Normalized BM25 score for the candidate. |
-| `salience` | Candidate's stored salience score. |
+| `vector_score` | Vector similarity normalized to 0..1. |
+| `bm25_score` | BM25 relevance normalized to 0..1 against the best hit of the query. |
+| `salience` | Candidate's stored `salience_score` in [0, 1]. Rows without one (not scored yet, or a chatgroup with `use_salience` false/null) get the neutral 1.0. |
 | `linked_count` | Number of messages linked to the candidate (events, topics, facts) or 1 for raw messages. |
 
 ### Formula evaluation
 
-- The formula is stored as a Python lambda string on the `ChatGroup`.
-- It is evaluated using `asteval` with no builtins and no imports allowed.
-- The evaluator is instantiated per call; no persistent interpreter state leaks between calls.
-- If evaluation fails, retrieval falls back to the system default formula and logs a warning.
+- The formula is stored as a Python lambda string on the ChatGroup (`DEFAULT_RANKING_FORMULA` as the pydantic default).
+- It is evaluated with plain `eval` in a namespace restricted to a few math helpers
+  (`max`, `min`, `abs`, `log`, `log10`, `sqrt`, and the `link_weight` curve: 0 links →
+  0.5, 100 links → 1.0, logarithmic in between). This is deliberately not a security
+  boundary — accepted for the local single-user deployment, tracked as issue 001 in
+  `plan/issue.md`.
+- Each distinct formula string is compiled once and cached for the process lifetime.
+- An invalid formula (not a lambda expression, or raising when called) makes the search
+  request fail; the formula is not pre-validated at chatgroup create/update time.
 
 ## Step 7: pack into token budget
 

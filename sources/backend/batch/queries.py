@@ -28,7 +28,13 @@ class _HasEmbedding(Protocol):
     created_at: Any
 
 
+class _HasSalience(Protocol):
+    salience_score: Any
+    created_at: Any
+
+
 T = TypeVar("T", bound=_HasEmbedding)
+S = TypeVar("S", bound=_HasSalience)
 
 # Fallback when a chatgroup's config predates the key; matches the ChatGroupConfig default.
 _DEFAULT_PROTECTED_COUNT = ChatGroupConfig().protected_message_count
@@ -95,10 +101,16 @@ class BatchQueries:
         state_key: str,
     ) -> MessageDO | None:
         """Return the oldest single message waiting for the given pipeline, skipping
-        messages inside their chat's protected window."""
+        messages inside their chat's protected window.
+
+        Consolidation eligibility also requires `salience = done`: the salience stage
+        runs earlier in the same worker round, so a message is scored before it is
+        consolidated (and a salience failure pauses consolidation of that message).
+        """
         stmt = (
             select(MessageDO)
             .where(MessageDO.processing_state[state_key].astext == ProcessingStatus.WAITING)
+            .where(MessageDO.processing_state["salience"].astext == ProcessingStatus.DONE)
             .where(_is_outside_protected_window())
             .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
             .limit(1)
@@ -116,11 +128,13 @@ class BatchQueries:
     ) -> list[MessageDO]:
         """Return up to block_size messages in a chat waiting for the pipeline, starting
         at or after a timestamp. Messages inside their chat's protected window are
-        excluded, so the block may be shorter than block_size."""
+        excluded, so the block may be shorter than block_size. Like the anchor query,
+        consolidation requires `salience = done`."""
         stmt = (
             select(MessageDO)
             .where(MessageDO.chat_id == chat_id)
             .where(MessageDO.processing_state[state_key].astext == ProcessingStatus.WAITING)
+            .where(MessageDO.processing_state["salience"].astext == ProcessingStatus.DONE)
             .where(MessageDO.embedding.isnot(None))
             .where(MessageDO.created_at >= min_created_at)
             .where(_is_outside_protected_window())
@@ -143,6 +157,17 @@ class BatchQueries:
         return list(res.scalars().all())
 
     @staticmethod
+    async def get_memory_objects_without_salience(
+        session: AsyncSession,
+        model: type[S],
+        limit: int,
+    ) -> list[S]:
+        """Return objects of the given model whose salience_score column is NULL."""
+        stmt = select(model).where(model.salience_score.is_(None)).order_by(model.created_at.asc()).limit(limit)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
     async def count_waiting_messages(session: AsyncSession) -> int:
         """Count messages that still have at least one waiting pipeline flag.
 
@@ -155,6 +180,7 @@ class BatchQueries:
             .where(
                 or_(
                     MessageDO.processing_state["embedding"].astext == ProcessingStatus.WAITING,
+                    MessageDO.processing_state["salience"].astext == ProcessingStatus.WAITING,
                     MessageDO.processing_state["event"].astext == ProcessingStatus.WAITING,
                     MessageDO.processing_state["topic"].astext == ProcessingStatus.WAITING,
                     MessageDO.processing_state["fact"].astext == ProcessingStatus.WAITING,

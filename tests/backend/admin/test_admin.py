@@ -6,6 +6,8 @@ import pytest
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO
 from backend.fact.models import FactDO
+from backend.llm import Provider
+from backend.llm.provider import DecisionAnswer
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
 from backend.topic.models import TopicDO
@@ -65,11 +67,19 @@ async def clean_memory_tables():
         )
 
 
+def _fake_decide():
+    async def decide(self, state, questions, task=None, keep_alive=None):
+        return {name: DecisionAnswer(type="score", score=2.0) for name in questions}
+
+    return decide
+
+
 @pytest.fixture
 def fake_langchain_client():
     with (
         patch("backend.llm.provider.OpenAIEmbeddings", _fake_embeddings()),
         patch("backend.llm.provider.ChatOpenAI", _fake_chat_model()),
+        patch.object(Provider, "decide", _fake_decide()),
     ):
         yield
 

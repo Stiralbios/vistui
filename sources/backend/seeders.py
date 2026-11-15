@@ -83,7 +83,7 @@ _DEMO_MESSAGES = [
 def _default_processing_state() -> dict:
     return {
         "embedding": ProcessingStatus.WAITING,
-        "salience": ProcessingStatus.DONE,
+        "salience": ProcessingStatus.WAITING,
         "event": ProcessingStatus.WAITING,
         "topic": ProcessingStatus.WAITING,
         "fact": ProcessingStatus.WAITING,
@@ -150,9 +150,8 @@ async def seed_demo_chat() -> dict:
                 prev_message_id=prev_id,
                 full_text=text,
                 role=role,
-                # Neutral placeholder, same 0.5 the pipelines hardcode for events/topics/
-                # facts: Phase 3 short-circuits real salience scoring (marked done).
-                salience_score=0.5,
+                # No placeholder: salience starts NULL and is scored by the salience
+                # stage (plan 4.4, decision model).
                 processing_state=_default_processing_state(),
                 created_at=created_at,
             )

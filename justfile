@@ -41,11 +41,15 @@ test:
 # Run the batch integration tests against the real Ollama provider (slow, needs a
 # reachable providers.yaml endpoint). Boots the app through its lifespan, which seeds
 # the 30 demo messages on startup, then runs real consolidation worker rounds.
+# The background scheduler is disabled (VISTUI_BATCH_INTERVAL_SECONDS=0) so only the
+# admin-triggered rounds run: it would otherwise race with the test (its rounds drain
+# the queue while the test's own slow round is still in flight).
 # Override the number of rounds with VISTUI_INTEGRATION_MAX_ROUNDS (default 2).
 test-integration:
     VISTUI_DATABASE_URL=$VISTUI_TEST_DATABASE_URL \
     VISTUI_INTEGRATION_TESTS=1 \
     VISTUI_SEED_DEMO=1 \
+    VISTUI_BATCH_INTERVAL_SECONDS=0 \
     JWT_SECRET_KEY=OSEF \
     DEFAULT_EMAIL=test@example.com \
     DEFAULT_PASSWORD=devpassword123 \

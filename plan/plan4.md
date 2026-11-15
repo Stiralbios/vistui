@@ -15,7 +15,7 @@
 | Event continuity | The most recent Event of a chat is **edited/extended** when the next eligible block continues it, instead of always creating a new Event. Decision (extend vs new block) by `d3:4b`; rewritten summary by `gemma4:e4b`. |
 | Protected window | Unchanged invariant: the `protected_message_count` (default 10) most recent messages of a chat never enter an Event until they leave the window (already enforced by `_is_outside_protected_window()` in `queries.py`). Extension only ever touches eligible messages. |
 | BM25 | ParadeDB `bm25` index over the raw `full_text` column (tokenization is handled by the index; rows are indexed automatically on insert/update). The `search_vector` TSVECTOR column is **dropped**: nothing ever wrote it, and hybrid fusion already happens at the ranking-formula level (`vector_score`, `bm25_score`), so a separate Postgres-native tsvector is redundant. Re-add later only if Postgres-native `ts_rank` scoring is ever needed. |
-| Salience | Real scoring via `d3:4b`: new batch stage scores messages (and memory objects) 0.0–1.0. The Phase 3 short-circuit is removed: the seeder no longer pre-marks salience `done` and no longer hardcodes `0.5`. `ChatGroupConfig.use_salience = false` keeps the old short-circuit behavior (mark done, placeholder 0.5). |
+| Salience | Real scoring via `d3:4b`: new batch stage scores messages (and memory objects) 0.0–1.0. The Phase 3 short-circuit is removed: the seeder no longer pre-marks salience `done` and no longer hardcodes `0.5`. `ChatGroupConfig.use_salience` false/null opts out: the stage only marks `done`, `salience_score` stays NULL, and the search formula passes the neutral salience (1.0) for those rows. |
 | Decision model | `d3:4b` handles all create/update/skip decisions (topic candidates, fact candidates, event grouping boundaries, extend-vs-new). `gemma4:e4b` writes all summaries. This maps onto the existing prompt/task split (`topic_candidate` vs `topic_update`, `fact_candidate` vs `fact_update`). |
 | Failure handling | Decision calls that return nothing parseable degrade to a safe default (extend → new; candidate → skip) and the message still completes. Generation failures keep the existing worker semantics (mark failed, count, retry count). |
 | Per-task models | `providers.yaml` overrides updated: `salience`, `topic_candidate`, `fact_candidate`, `event_decision` (new task) → `d3:4b`; `event`, `topic_update`, `fact_update` → `gemma4:e4b`. |
@@ -140,26 +140,38 @@ Index(
 - ParadeDB maintains the index automatically on insert/update — no triggers, no columns to keep in sync.
 - Why dropping is safe: no code has ever read or written `search_vector`; hybrid ranking takes `bm25_score` straight from `paradedb.score(full_text)` and `vector_score` from cosine distance; a Postgres-native tsvector path can be reintroduced later if `ts_rank`-based fusion is ever wanted.
 
-### 4.4 Salience with the decision model
+### 4.4 Salience with the decision model — DONE (2026-11-15)
 
-- `providers.yaml` override: `salience: {provider: local-ollama, model: "d3:4b"}`.
-- New `backend/batch/salience.py`:
+As built (the original sketch — a chat completion returning `{"salience": <float>}` —
+was superseded by the System One discovery, see §8):
 
-```python
-class SaliencePipeline:
-    """Score waiting messages 0.0–1.0 with the decision model."""
-
-    @classmethod
-    async def run_round(cls, provider, limit=10) -> int:
-        # oldest messages with processing_state.salience == waiting
-        # prompt: chatgroup's prompts["salience"] (fallback: default)
-        # response: {"salience": <float>} → clamp to [0, 1] → store, mark done
-```
-
-- New stage `score_memory_objects(limit=32)`: events/topics/facts with `salience_score IS NULL` get scored from their `full_text` (one batched call per model). The pipelines stop hardcoding `salience_score=0.5` and leave it NULL for this stage.
-- `ChatGroupConfig.use_salience = false` → the pipeline short-circuits: mark done, set 0.5 (old behavior preserved for groups that opt out).
-- Seeder: `_default_processing_state()` sets `salience: waiting`; the `salience_score=0.5` placeholder is removed (the pipeline writes the real score).
-- `count_waiting_messages()` adds the `salience` flag so queue depth reflects the new stage.
+- `providers.yaml` override: `salience: {provider: local-ollama, model: "d3:4b"}` — a
+  *decision task* resolved by `Provider.decide(task="salience")` against the same
+  overrides map as chat tasks, falling back to `defaults.decision`.
+- `backend/batch/salience.py`: `SaliencePipeline.run_round(limit=10)` groups the oldest
+  waiting messages by chatgroup and scores each group in `decide()` calls — shared state
+  `{chatgroup, messages: [{id, role, text}]}`, one `ScoreQuestion` per message keyed by
+  its id, built from the chatgroup's `prompts["salience"]` plus "Judge the message with
+  id … in the state.", against a fixed 5-level rubric (trivial → critical). The
+  probability-weighted rubric index normalized by `len - 1` gives the 0..1 salience.
+  Calls are chunked at 5 questions (measured: latency grows superlinearly with state
+  size — 3 questions on a 3-message state took 38s), `keep_alive="10m"` keeps d3 warm,
+  and `local-ollama.timeout_seconds` went 120 → 300 (only decision calls use it).
+- New stage `score_memory_objects(limit=32)`: events/topics/facts with
+  `salience_score IS NULL` scored from `full_text` the same way (state key
+  `events`/`topics`/`facts`, one decide call per model per chatgroup). The pipelines
+  stopped hardcoding `salience_score=0.5` (creates leave NULL) and topic/fact updates
+  clear it alongside the embedding for regeneration.
+- `use_salience` false/null opts out: messages only get the flag marked `done`,
+  `salience_score` stays NULL, no decision call — search passes neutral 1.0.
+- Seeder: `_default_processing_state()` sets `salience: waiting`, no placeholder score.
+- `count_waiting_messages()` includes the `salience` flag; the documented
+  embedding+salience-done gate for event/topic/fact consolidation is now enforced in
+  `queries.py` (salience runs earlier in the same round, so a message is scored before
+  it is consolidated).
+- Live run against real d3:4b on the dev DB — 10 messages in 2 chunked calls (246s),
+  then 10 memory objects (3 calls, 160s). Scores are sensible: hiking plans/preferences
+  0.44–0.66, minor context 0.29–0.40, stale "Demo event" placeholders 0.06–0.22.
 - Worker round becomes:
 
 ```
@@ -309,6 +321,7 @@ Unit/integration test updates:
 - 2026-11-15: Middle step before 4.4/4.5: switched providers.yaml to the gomodel proxy (embedding via the `ollama_yople` upstream, LLM to `strata_toaster/iq3_xxs`), and validated the `d3:4b` decision model: it is System One-only (`/v1/systemone`, no chat completions) and gomodel cannot proxy that endpoint to ollama yet, so decisions go direct to `local-ollama`. See §9.
 - 2026-11-15: Decision-model support in code: `defaults.decision` key in providers.yaml (local-ollama/d3:4b) and `Provider.decide()` — a System One client with typed `ChoiceQuestion`/`NoulQuestion`/`ScoreQuestion` models, `DecisionAnswer` parsing, keep_alive passthrough and 8 hermetic tests. See §9.
 - 2026-11-15: Removed the never-wired `keywords` task (ChatGroupPrompts field, providers.yaml override, docs): no pipeline called it, nothing stored it, and BM25 indexes raw text. `memory_ratio` kept for the future search token-budget split (issue 002).
+- 2026-11-15: Implemented 4.4 (salience with the decision model): `Provider.decide(task=...)` resolves decision tasks from the same overrides map, `SaliencePipeline` + `score_memory_objects` score messages and memory objects with d3:4b `ScoreQuestion` rubrics in chunks of 5, opt-out chatgroups keep `salience_score` NULL (neutral 1.0 at scoring time — user decision, no fabricated placeholder), seeder/queue/gate updated, 9 new tests + integration assertions, `VISTUI_BATCH_INTERVAL_SECONDS=0` now disables the background scheduler (kills the pre-existing integration-test race). See §9.
 
 ---
 
@@ -329,6 +342,37 @@ Unit/integration test updates:
 **Verification:** `EXPLAIN ANALYZE` shows `Custom Scan (ParadeDB Base Scan)` on `message_bm25_idx` with `Exec Method: TopKScanExecState`, `TopK Order By: pdb.score() desc` and the `chat_id` filter pushed into the Tantivy query as a term — no post-index sort. Live calls against the real `embeddinggemma-2:740m` provider rank "My favourite hiking boots…" (bm25 5.65, vector 0.79) above "I went hiking in the mountains…" (bm25 3.49) above a semantically close but lexically absent "…balcony fence…" (bm25 0, vector 0.56). Nine search tests (`tests/backend/search/`) cover formula evaluation, the default formula, BM25 normalization, the link-weight curve, auth/404, `k` truncation and the full hybrid ranking; `alembic upgrade head` on the dev DB reaches `0003`.
 
 **Notes:** the draft's `paradedb.all(full_text) & paradedb.parse(...)` is a no-op conjunction, so the implementation uses bare `parse()`. Multi-word queries are OR'd by ParadeDB's parser ("hiking boots" matches hiking-only rows). No vector index (HNSW/ivfflat) is created: the vector channel scans the chatgroup's rows with `ORDER BY cosine_distance(...) LIMIT 20`, fine for per-chatgroup result sets but worth revisiting at scale.
+
+### Phase 3 — Salience with the decision model (2026-11-15) — DONE
+
+**Changes:** `Provider.decide()` gained `task=` (decision tasks resolve from the same
+`overrides:` map as chat tasks, `defaults.decision` as fallback; the `salience` override
+points at `local-ollama`/`d3:4b`). New `backend/batch/salience.py` with two worker stages
+inserted between the embedding stages and consolidation: `salience` (`SaliencePipeline`,
+10 oldest waiting messages per round, grouped per chatgroup, chunked `decide()` calls of
+5 `ScoreQuestion`s keyed by message id against a 5-level rubric, normalized score
+`score / 4` clamped to [0,1]) and `memory_salience` (`score_memory_objects`, NULL-pickup
+for events/topics/facts, up to 32 per round, one call per model per chatgroup). Opt-out
+(`use_salience` false/null) marks the message stage done but leaves the score NULL — no
+decision call, neutral 1.0 at scoring time. The event/topic/fact queries now enforce the
+documented `salience = done` gate; topic/fact rewrites clear `salience_score` with the
+embedding; the seeder queues salience like any other stage. `VISTUI_BATCH_INTERVAL_SECONDS=0`
+disables the background scheduler (used by `just test-integration` to kill the
+admin-trigger-vs-scheduler race).
+
+**Verification:** 90 unit tests (9 new: decide task override, salience scoring/chunking,
+opt-out NULL, malformed-answer rollback, memory scoring, gate, queue count, seeded
+state, worker round). Live end-to-end on the dev DB against real d3:4b: 10 messages
+scored in 2 chunked calls (246s total, keep_alive 10m) and 10 memory objects in 3 calls
+(160s) — hiking plans/preferences 0.44–0.66, minor context 0.29–0.40, stale placeholder
+texts 0.06–0.22. All hooks green (ruff/format/flake8/bandit/mypy).
+
+**Notes:** the original plan sketch (chat completion returning `{"salience": float}`)
+predates the System One discovery — d3:4b has no chat API. Latency is the cost of the
+probability-weighted rubric (measured ~10s/question, superlinear in state size), hence
+chunking at 5 and the 300s provider timeout; a 30-message chat drains in ~3 rounds
+(~12 min of d3 time). gomodel still cannot proxy `/v1/systemone`, so decision calls
+stay direct to `local-ollama` (HTTP 400 "provider type ollama has no System One API").
 
 ### Phase 3 — Ranking normalization and link weighting (2026-11-15) — DONE
 

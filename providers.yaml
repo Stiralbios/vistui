@@ -2,7 +2,9 @@ providers:
   local-ollama:
     base_url: "http://192.168.9.137:11434/v1"
     api_key_env: "OLLAMA_API_KEY"
-    timeout_seconds: 120
+    # Only decision (System One) calls use this provider now, and they are slow:
+    # d3:4b takes ~10s per scored question, so chunks of 5 need minutes of headroom.
+    timeout_seconds: 300
   # gomodel is an OpenAI-compatible proxy in front of several ollama upstreams:
   #   - "ollama_yople/*": our own ollama box (same host as local-ollama, reached via the proxy)
   #   - "strata_toaster/*": the toaster PC on another network, not reachable directly
@@ -29,12 +31,15 @@ defaults:
     provider: "local-ollama"
     model: "d3:4b"
 
-# Per-task chat overrides: the explicit tuning surface for individual pipeline tasks.
-# They currently duplicate defaults.llm; 4.5 will split them (decision vs generation).
+# Per-task overrides: the explicit tuning surface for individual pipeline tasks, for
+# chat tasks and decision tasks alike (decide(task=...) resolves here too). The chat
+# entries currently duplicate defaults.llm; 4.5 will split them (decision vs generation).
 overrides:
+  # Decision task (System One /v1/systemone), not a chat task: must point at a
+  # directly reachable ollama provider — gomodel cannot forward /v1/systemone.
   salience:
-    provider: "gomodel"
-    model: "strata_toaster/iq3_xxs"
+    provider: "local-ollama"
+    model: "d3:4b"
   memory_ratio:
     provider: "gomodel"
     model: "strata_toaster/iq3_xxs"

@@ -5,9 +5,11 @@ lifespan (which seeds the 30 demo messages on startup, like a normal app start w
 VISTUI_SEED_DEMO=1), then real batch worker rounds are triggered through the admin
 API and the consolidation results are checked in the database.
 
-These tests are slow (each LLM call takes tens of seconds with the local Ollama
-models) and need a reachable provider as configured in providers.yaml. They are
-opt-in: run them with `just test-integration` (sets VISTUI_INTEGRATION_TESTS=1).
+These tests are slow (each round runs a real embedding batch, two batched salience
+decision calls against the decision model, and one real LLM call per consolidation
+pipeline — several minutes per round with the local models) and need a reachable
+provider as configured in providers.yaml. They are opt-in: run them with
+`just test-integration` (sets VISTUI_INTEGRATION_TESTS=1).
 """
 
 import os
@@ -35,9 +37,10 @@ pytestmark = [
     ),
 ]
 
-# Each round runs one embedding batch plus one real LLM call per pipeline (event, topic,
-# fact), so a round takes minutes with the real provider: keep the default low and
-# override with VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
+# Each round runs one embedding batch, salience decision calls (10 messages in chunks
+# of 5) plus one real LLM call per pipeline (event, topic, fact), so a round takes
+# several minutes with the real providers: keep the default low and override with
+# VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
 MAX_ROUNDS = int(os.environ.get("VISTUI_INTEGRATION_MAX_ROUNDS", "2"))
 EMBEDDING_DIMENSIONS = get_provider_config().defaults.embedding.dimensions
 
@@ -82,8 +85,9 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             assert response.json() == {"status": "ok"}
             depths.append(await _queue_depth(client))
 
-        # The embedding and event stages are batched, while the topic and fact stages each
-        # process one message per round: the queue drains by exactly one message per round.
+        # The embedding, salience and event stages are batched (10 messages per round for
+        # salience and events), while the topic and fact stages each process one message
+        # per round: the queue drains by exactly one message per round.
         assert depths == [30 - i for i in range(1, MAX_ROUNDS + 1)]
 
         # The worker swallows pipeline errors into recent_failures: none should have fired.
@@ -111,6 +115,17 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             for message in messages:
                 _assert_real_embedding(message)
                 assert message.processing_state["embedding"] == ProcessingStatus.DONE
+
+            # Salience stage: the decision model (d3:4b) scored the 10 oldest messages
+            # per round with a real salience in [0, 1]; like the embedding stage it
+            # ignores the protected window, and the rest are still waiting.
+            for message in messages[: 10 * MAX_ROUNDS]:
+                assert message.processing_state["salience"] == ProcessingStatus.DONE
+                assert message.salience_score is not None
+                assert 0.0 <= message.salience_score <= 1.0
+            for message in messages[10 * MAX_ROUNDS :]:
+                assert message.processing_state["salience"] == ProcessingStatus.WAITING
+                assert message.salience_score is None
 
             # Event stage: one block of 10 messages per round.
             event_done = [m for m in messages if m.processing_state["event"] == ProcessingStatus.DONE]
@@ -168,6 +183,9 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
                 assert any(
                     event.embedding is not None and len(event.embedding) == EMBEDDING_DIMENSIONS for event in events
                 )
+                # Likewise, the memory salience stage of a later round scored the
+                # events created by an earlier one.
+                assert any(event.salience_score is not None and 0.0 <= event.salience_score <= 1.0 for event in events)
 
         # 4. Hybrid search through the real API: real query embedding + ParadeDB BM25.
         login = await client.post(

@@ -25,7 +25,10 @@ class ChatGroupConfig(BaseModel):
     token_budget: int = 2000
     memory_ratio: MemoryRatio = Field(default_factory=MemoryRatio)
     use_llm_memory_ratio: bool = False
-    use_salience: bool = True
+    # Null or false opts the chatgroup out of salience scoring: rows keep
+    # salience_score NULL (nothing is fabricated) and the search formula passes the
+    # neutral salience (1.0) for them.
+    use_salience: bool | None = True
     protected_message_count: int = 10
     topic_update_threshold: float = 0.75
     fact_update_threshold: float = 0.80

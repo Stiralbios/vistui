@@ -17,6 +17,8 @@ from backend.chatgroup.schemas import (
     ChatGroupPrompts,
 )
 from backend.database import get_async_sessionmaker
+from backend.llm import Provider
+from backend.llm.provider import DecisionAnswer
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
 from backend.search.scoring import LINK_WEIGHT_REFERENCE, evaluate_ranking_formula, link_weight, normalize_bm25
@@ -67,11 +69,24 @@ def _fake_chat_model():
     return FakeChatModel
 
 
+def _fake_decide():
+    """Decision calls return the top rubric level for messages (salience 1.0) but a
+    mid level for memory objects (0.5): the event then keeps ranking below the plain
+    messages through its lower salience, exercising the formula's salience factor."""
+
+    async def decide(self, state, questions, task=None, keep_alive=None):
+        score = 4.0 if "messages" in state else 2.0
+        return {name: DecisionAnswer(type="score", score=score) for name in questions}
+
+    return decide
+
+
 @pytest.fixture
 def fake_langchain_client():
     with (
         patch("backend.llm.provider.OpenAIEmbeddings", _fake_embeddings()),
         patch("backend.llm.provider.ChatOpenAI", _fake_chat_model()),
+        patch.object(Provider, "decide", _fake_decide()),
     ):
         yield
 
@@ -120,6 +135,7 @@ async def _seed_search_data() -> dict:
                     role="user",
                     processing_state={
                         "embedding": ProcessingStatus.WAITING,
+                        "salience": ProcessingStatus.WAITING,
                         "event": ProcessingStatus.WAITING,
                         "topic": ProcessingStatus.WAITING,
                         "fact": ProcessingStatus.WAITING,
@@ -204,7 +220,8 @@ def test_link_weight_is_logarithmic():
 async def test_search_endpoint_hybrid_ranking(client: AsyncClient):
     """Search must merge BM25 and vector candidates, then rank them with the chatgroup formula."""
     ids = await _seed_search_data()
-    # Round 1 embeds the messages and creates a topic and a fact; round 2 embeds them.
+    # Round 1 embeds and scores the messages and creates a topic and a fact; round 2
+    # embeds and scores those memory objects.
     assert (await client.post("/admin/batch/trigger")).status_code == 200
     assert (await client.post("/admin/batch/trigger")).status_code == 200
 
@@ -245,13 +262,13 @@ async def test_search_endpoint_hybrid_ranking(client: AsyncClient):
     assert hits[0]["type"] == "message"
     assert all(hit["score"] == pytest.approx(link_weight(3)) for hit in linked_messages)
 
-    # Plain messages (one event link each, salience unset -> neutral 1.0) follow.
+    # Plain messages (one event link each, salience 1.0 from the fake decision call) follow.
     plain_messages = [hit for hit in message_hits if hit["linked_count"] == 1]
     assert len(plain_messages) == 8
     assert all(hit["score"] == pytest.approx(link_weight(1)) for hit in plain_messages)
 
-    # The event spans all ten block messages (10 links) but carries the Phase 3 placeholder
-    # salience of 0.5, which halves its score until the salience pipeline (plan 4.4) runs.
+    # The event spans all ten block messages (10 links) but the fake decision call scored
+    # it at 0.5 (mid rubric level), which halves its score below every plain message.
     event_hit = next(hit for hit in hits if hit["type"] == "event")
     assert event_hit["linked_count"] == 10
     assert event_hit["salience"] == pytest.approx(0.5)

@@ -98,3 +98,12 @@ Search should return the x best result. Limited by the amount of token the clien
 
 
 ## Issue 003 — Key embedding and sallience in message processing state: do we really need them ?
+
+State after plan 4.4 (2026-11-15): both flags drive the state machine, not the columns.
+`embedding`/`salience` = done is the gate for event/topic/fact consolidation (the worker
+marks them done in the same round before consolidating), and `count_waiting_messages`
+uses them for the queue depth, so removing the keys would stall consolidation and the
+admin status. The columns themselves are independent: `salience_score` stays NULL for
+not-yet-scored rows and for chatgroups with `use_salience` false/null (neutral 1.0 at
+scoring time), and `embedding` NULL just excludes a row from the vector channel. See
+`plan/plan4.md` §9.

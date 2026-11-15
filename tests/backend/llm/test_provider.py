@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from backend.llm.config import LLMSettings, ProviderConfig
+from backend.llm.config import LLMSettings, ProviderConfig, ProviderSpec, TaskConfig
 from backend.llm.provider import (
     ChoiceQuestion,
     DecisionAnswer,
@@ -147,6 +147,30 @@ async def test_decide_builds_request_and_parses_answers():
     assert answers["mood"].choice == "positive"
     assert answers["mood"].probabilities["positive"] == pytest.approx(0.9731)
     assert isinstance(answers["salience"], DecisionAnswer)
+
+
+async def test_decide_resolves_task_override():
+    """A decision task resolves against the same overrides map as chat tasks: decide()
+    with task='salience' posts to the override's provider and model, while taskless
+    calls keep defaults.decision."""
+    config = _test_config()
+    config.providers["direct"] = ProviderSpec(base_url="http://direct.test/v1", api_key_env="VISTUI_LLM_API_KEY")
+    config.overrides["salience"] = TaskConfig(provider="direct", model="other-d3")
+
+    captured: list = []
+    provider = Provider(config)
+    questions = {"keep": NoulQuestion(instructions="keep?")}
+    with patch(
+        "backend.llm.provider.httpx.AsyncClient",
+        _fake_systemone_client(captured, _SERVER_RESPONSE),
+    ):
+        await provider.decide("state", questions, task="salience")
+        await provider.decide("state", questions)
+
+    assert captured[0]["url"] == "http://direct.test/v1/systemone"
+    assert captured[0]["json"]["model"] == "other-d3"
+    assert captured[1]["url"] == "http://ollama.test/v1/systemone"
+    assert captured[1]["json"]["model"] == "d3:4b"
 
 
 async def test_decide_passes_keep_alive():

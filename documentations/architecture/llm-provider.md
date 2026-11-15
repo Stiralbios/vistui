@@ -2,12 +2,15 @@
 
 ## Context
 
-Vistui needs two kinds of model calls:
+Vistui needs three kinds of model calls:
 
 - **Embeddings** — dense vector representations of text.
-- **LLM completions / chat** — memory ratio, salience scoring, and all batch consolidation prompts.
+- **LLM completions / chat** — memory ratio and all batch consolidation prompts.
+- **Decision calls (System One)** — salience scoring for messages and memory objects.
 
-Both are expected to be served by OpenAI-compatible APIs. This allows self-hosters to mix providers (e.g., local Ollama for embeddings, remote OpenAI-compatible API for LLM calls).
+Embeddings and chat are served by OpenAI-compatible APIs, so self-hosters can mix
+providers (e.g., local Ollama for embeddings, remote OpenAI-compatible API for LLM
+calls). Decision calls need an ollama System One endpoint (see below).
 
 ## Goals
 
@@ -55,10 +58,11 @@ defaults:
     model: "d3:4b"
 
 overrides:
+  # The salience override is a *decision task*: its provider must be a directly
+  # reachable ollama System One endpoint (not a chat model).
   salience:
-    provider: "remote-llm"
-    model: "gpt-4o-mini"
-    temperature: 0.0
+    provider: "local-ollama"
+    model: "d3:4b"
   memory_ratio:
     provider: "remote-llm"
     model: "gpt-4o-mini"
@@ -120,11 +124,13 @@ The application wraps the OpenAI SDK with a thin adapter:
 class Provider:
     def embed(self, texts: list[str]) -> list[list[float]]: ...
     def chat(self, messages: list[dict], task: str) -> str: ...
-    async def decide(self, state, questions: dict[str, SystemOneQuestion], keep_alive=None) -> dict[str, DecisionAnswer]: ...
+    async def decide(
+        self, state, questions: dict[str, SystemOneQuestion], keep_alive=None, task: str | None = None
+    ) -> dict[str, DecisionAnswer]: ...
 ```
 
-- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`).
-- If no override exists for a task, the `defaults.llm` or `defaults.embedding` config is used.
+- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`). The same overrides map serves chat tasks and decision tasks: the batch salience stage calls `decide(..., task="salience")`, which resolves the `salience` override with `defaults.decision` as fallback.
+- If no override exists for a task, the `defaults.llm`, `defaults.embedding` or `defaults.decision` config is used.
 - The adapter parses the YAML and resolves `api_key_env` once at startup. The file can be reloaded on SIGHUP or via an admin endpoint.
 
 ## Embedding call semantics
@@ -158,14 +164,19 @@ Decision models (System One, e.g. `d3:4b`) answer **typed questions** on ollama'
 `POST /v1/systemone` endpoint; they have no chat-completions API and never produce
 conversational text.
 
-- `decide(state, questions)` sends one JSON-serializable `state` shared by all questions
-  (1-64, keyed by name) using the `defaults.decision` provider/model.
+- `decide(state, questions, keep_alive=None, task=None)` sends one JSON-serializable
+  `state` shared by all questions (1-64, keyed by name), using the task's override
+  provider/model or `defaults.decision`.
 - Question types: `ChoiceQuestion` (labeled options -> best label + probabilities),
   `NoulQuestion` (yes/no -> probability of true) and `ScoreQuestion` (2-10 ordered rubric
   levels -> probability-weighted index plus per-level probabilities and confidence).
 - Answers come back as `DecisionAnswer` objects keyed by the question names; answers never
   feed later questions (each is scored independently).
 - `keep_alive` keeps the model loaded between batch requests (duration string or seconds).
+- Decision calls are slow: `d3:4b` takes ~10s per question, and every question is scored
+  against the whole state, so batched calls grow superlinearly. The salience stages send
+  at most 5 questions per call and give the decision provider a generous
+  `timeout_seconds` (300 in the dev config; only decision calls use `local-ollama`).
 - Routing caveat: gomodel does not forward `/v1/systemone` to ollama upstreams, so the
   decision provider must be a directly reachable ollama (`local-ollama` in the dev config).
 
@@ -195,3 +206,4 @@ conversational text.
 - 2026-07-11: Initial LLM provider design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: split `fact` task into `fact_candidate` and `fact_update`, split `topic` task into `topic_candidate` and `topic_update`.
 - 2026-11-15: Added `defaults.decision` and `Provider.decide()` for System One decision models (`/v1/systemone`): typed `choice`/`noul`/`score` questions, probability answers, direct-ollama routing only.
+- 2026-11-15: Plan 4.4 — `decide()` gained the `task` parameter (overrides map now serves decision tasks too); the batch salience stages score messages and memory objects with `d3:4b` against a 5-level rubric in chunks of 5 questions, `keep_alive` keeps the model warm between rounds.

@@ -6,6 +6,7 @@ from typing import Any
 from backend.batch.embeddings import embed_memory_objects, embed_messages
 from backend.batch.pipelines import EventPipeline, FactPipeline, TopicPipeline
 from backend.batch.queries import BatchQueries
+from backend.batch.salience import SaliencePipeline, score_memory_objects
 from backend.batch.status import batch_status
 from backend.database import get_async_sessionmaker
 from backend.llm import Provider
@@ -49,6 +50,8 @@ class BatchWorker:
             pipelines: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
                 ("embedding", embed_messages),
                 ("memory_embedding", embed_memory_objects),
+                ("salience", SaliencePipeline.run_round),
+                ("memory_salience", score_memory_objects),
                 ("event", EventPipeline.run_round),
                 ("topic", TopicPipeline.run_round),
                 ("fact", FactPipeline.run_round),
@@ -81,9 +84,10 @@ class BatchWorker:
 
     @staticmethod
     async def _peek_message_id(state_key: str) -> uuid.UUID | None:
-        """Return the id of the next message waiting for this stage (None for the embedding
-        stages, which operate on batches rather than a single message)."""
-        if state_key in ("embedding", "memory_embedding"):
+        """Return the id of the next message waiting for this stage (None for the batch
+        stages — embeddings and both salience stages — which operate on batches rather
+        than a single message)."""
+        if state_key in ("embedding", "memory_embedding", "salience", "memory_salience"):
             return None
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, state_key)
