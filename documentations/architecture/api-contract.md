@@ -156,7 +156,6 @@ Request:
   },
   "prompts": {
     "salience": "...",
-    "keywords": "...",
     "memory_ratio": "...",
     "event": "...",
     "topic_candidate": "...",
@@ -301,7 +300,7 @@ Rules:
 - If `message_id` does not exist, a new Message is created.
 - If `message_id` exists, it is overwritten in place.
 - The linked list is validated: `prev_message_id` and `next_message_id` must be consistent with existing neighbors.
-- The embedding and keywords are recomputed.
+- The embedding is recomputed.
 - Memory ratio is determined per retrieval request, either by LLM (if `use_llm_memory_ratio` is enabled) or from the ChatGroup `memory_ratio` config.
 - Retrieval is performed only if `retrieve=true`.
 - Batch processing state is reset to `waiting` for embedding/salience on every save, and for event/topic/fact only if the message is outside the protected window.
@@ -316,7 +315,6 @@ Response: `200 OK` (or `201 Created` on first creation)
   "next_message_id": "uuid-or-null",
   "full_text": "Aria, do you remember our first date?",
   "role": "user",
-  "keywords": ["first date", "Aria", "memory"],
   "salience_score": 0.82,
   "processing_state": {
     "embedding": "waiting",

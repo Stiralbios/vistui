@@ -71,7 +71,6 @@ class MessageRead(MessageBase):
     prev_message_id: uuid.UUID | None
     next_message_id: uuid.UUID | None
     role: MessageRole
-    keywords: list[str]
     salience_score: float | None
     processing_state: ProcessingState
     created_at: datetime
@@ -121,7 +120,7 @@ class MessageService:
     async def save(self, message: MessageCreateInternal) -> MessageInternal:
         await self._validate_linked_list(message)
         if message.context.retrieve:
-            message = await self._compute_embedding_and_keywords(message)
+            message = await self._compute_embedding_and_salience(message)
         return await self.store.upsert(message)
 ```
 
@@ -185,7 +184,7 @@ class ProcessingStatus(StrEnum):
 | `user` | Planned | User management and authentication. |
 | `chatgroup` | Planned | Configuration, prompts, ranking formula, topics, and facts. |
 | `chat` | Planned | Chat windows bound to exactly one ChatGroup. |
-| `message` | Planned | Linked-list messages with embedding, keywords, and salience. |
+| `message` | Planned | Linked-list messages with embedding and salience. |
 | `event` | Planned | Contiguous message summaries within a Chat. |
 | `topic` | Planned | Recurring theme summaries across a ChatGroup. |
 | `fact` | Planned | Persistent facts across a ChatGroup. |

@@ -55,7 +55,7 @@ A single message inside a Chat, stored as a linked list.
 - `prev_message_id` and `next_message_id` must form a coherent sequence per Chat.
 - `role` must be one of `system`, `user`, or `assistant`.
 - `full_text` has a maximum length of 32,000 characters.
-- Embedding, keywords, and salience are recomputed on every save.
+- Embedding and salience are recomputed on every save.
 - Batch processing state is reset to `waiting` for embedding/salience on every save, and for event/topic/fact only if the message is outside the protected window.
 
 ### Files

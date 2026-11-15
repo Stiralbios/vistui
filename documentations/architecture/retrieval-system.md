@@ -24,7 +24,6 @@ When a caller sends a new or edited message with `retrieve=true`, Vistui must re
 flowchart LR
     M[New message]
     E[Generate embedding]
-    K[Generate keywords]
     R[Generate memory ratio]
     S[Save message]
     V[Vector search]
@@ -35,10 +34,8 @@ flowchart LR
     RESP[Return memory response]
 
     M --> E
-    M --> K
     M --> R
     E --> S
-    K --> S
     S --> V
     S --> B
     V --> NORM
@@ -49,7 +46,7 @@ flowchart LR
     PACK --> RESP
 ```
 
-The embedding, keyword, and memory-ratio generation steps run in parallel after the message text is known.
+The embedding and memory-ratio generation steps run in parallel after the message text is known.
 
 ## Step 1: generate embedding
 
@@ -58,23 +55,7 @@ The message `full_text` is sent to the configured embedding provider (see [`llm-
 - The embedding is stored on the `Message` row.
 - Reused if the message is edited and the text has not changed; otherwise recomputed.
 
-## Step 2: generate keywords
-
-A configured LLM prompt extracts search keywords from the message. These keywords are stored on the `Message` row and used for BM25 search.
-
-Prompt inputs:
-
-- `full_text`
-- `role`
-- Optional ChatGroup description for context.
-
-Expected output: a JSON array of lowercase keyword strings, e.g.:
-
-```json
-["aria", "first date", "memory"]
-```
-
-## Step 3: generate memory ratio
+## Step 2: generate memory ratio
 
 A configured LLM prompt analyzes the message and produces a desired distribution of memory categories for retrieval. Whether this step runs is controlled by the ChatGroup config flag `use_llm_memory_ratio`.
 
@@ -93,11 +74,11 @@ The ratio is multiplied by the token budget to compute per-category budgets. Rat
 
 If `use_llm_memory_ratio` is `false`, or if the LLM call fails, the system falls back to the `memory_ratio` stored in the ChatGroup config.
 
-## Step 4: save the message
+## Step 3: save the message
 
-The message, embedding, keywords, and salience score are persisted. See [`data-model.md`](data-model.md) and [`api-contract.md`](api-contract.md). The memory ratio is not stored on the message; it is computed on demand during retrieval.
+The message, embedding, and salience score are persisted. See [`data-model.md`](data-model.md) and [`api-contract.md`](api-contract.md). The memory ratio is not stored on the message; it is computed on demand during retrieval.
 
-## Step 5: search the memory
+## Step 4: search the memory
 
 Two searches are executed in parallel across the ChatGroup's memory.
 
@@ -120,7 +101,7 @@ Uses the `pg_search` extension over `search_vector` columns.
 
 Search scope is the same as vector search. The query returns top-N candidates per category with a raw BM25 score. Candidates without a computed `search_vector` are excluded.
 
-## Step 6: normalize scores
+## Step 5: normalize scores
 
 Before ranking, raw scores are normalized per category to the range `[0, 1]` using the best score in the candidate set for that category and search type.
 
@@ -134,7 +115,7 @@ This makes heterogeneous search signals comparable and allows the ranking formul
 
 No recency, message role, or other signals are used unless explicitly added by the user in the custom formula.
 
-## Step 7: merge and rank
+## Step 6: merge and rank
 
 For each candidate, compute a final relevance score using the ChatGroup's configurable `ranking_formula`.
 
@@ -163,7 +144,7 @@ lambda vector_score, bm25_score, salience, linked_count: max(
 - The evaluator is instantiated per call; no persistent interpreter state leaks between calls.
 - If evaluation fails, retrieval falls back to the system default formula and logs a warning.
 
-## Step 8: pack into token budget
+## Step 7: pack into token budget
 
 Given:
 
@@ -184,7 +165,7 @@ Packing algorithm:
 
 Use a simple whitespace / punctuation tokenizer. The estimate is intentionally approximate; callers may re-tokenize with their own model tokenizer.
 
-## Step 9: return memory response
+## Step 8: return memory response
 
 The API returns a `memory` block as defined in [`api-contract.md`](api-contract.md), containing metadata about the budget, the memory ratio, and a list of memory items.
 
@@ -193,13 +174,12 @@ The API returns a `memory` block as defined in [`api-contract.md`](api-contract.
 | Metric | Target | Notes |
 |--------|--------|-------|
 | Retrieval latency (no LLM) | < 200 ms p95 | Embedding + search + packing. |
-| Retrieval latency (with LLM keywords/ratio) | < 2 s p95 | Depends on LLM provider. |
+| Retrieval latency (with LLM ratio) | < 2 s p95 | Depends on LLM provider. |
 | Candidate pool size per category | 100 | Configurable via ChatGroup. |
 
 ## Failure handling
 
 - If embedding generation fails: return an error; the message cannot be retrieved.
-- If keyword generation fails: use empty keywords and continue.
 - If memory ratio generation fails: fall back to the ChatGroup `memory_ratio` and continue.
 - If formula evaluation fails: fall back to default formula.
 - If vector or BM25 search fails partially: return results from the other search and log a warning.

@@ -41,7 +41,6 @@ class ChatGroupFactory(BaseFactory[ChatGroupDO]):
     }
     prompts = {
         "salience": "Assign a salience score between 0 and 1 to the message.",
-        "keywords": "Extract a list of search keywords from the message.",
         "memory_ratio": "Determine the desired memory category distribution.",
         "event": "Summarize a contiguous block of messages into one or more events.",
         "topic_candidate": "Select existing topics to update or decide to create a new topic.",

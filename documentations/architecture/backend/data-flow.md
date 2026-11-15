@@ -21,7 +21,7 @@ External Schema Validation (schemas.py - external)
     v
 Service Layer (services.py)
     - Validate linked-list integrity
-    - Trigger embedding / keyword / salience computation
+    - Trigger embedding / salience computation
     - Coordinate retrieval
     |
     v
@@ -116,7 +116,7 @@ async def create(session: AsyncSession, ...) -> ...:
 The `PUT /chats/{chat_id}/messages/{message_id}?retrieve=true` path has an extended flow:
 
 1. Save or overwrite the message in the database.
-2. Compute embedding, keywords, and salience in parallel.
+2. Compute embedding and salience in parallel.
 3. Optionally compute a memory ratio via LLM or use the ChatGroup default.
 4. Run vector and BM25 searches across Messages, Events, Topics, and Facts.
 5. Normalize scores and rank candidates with the ChatGroup `ranking_formula`.

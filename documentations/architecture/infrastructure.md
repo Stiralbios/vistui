@@ -123,7 +123,7 @@ Vistui runs as a single Python process. APScheduler is embedded in the same proc
 
 - Serial batch worker limits concurrent LLM spend.
 - Configurable processing timeout prevents runaway jobs.
-- Retrieval only calls LLM for keyword and ratio generation when requested.
+- Retrieval only calls the LLM for memory-ratio generation when requested.
 
 ## Deployment
 

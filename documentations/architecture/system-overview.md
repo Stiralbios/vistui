@@ -67,7 +67,7 @@ flowchart LR
     FE -->|save message / retrieve memory| API
     API -->|store config, messages, memory| PG
     API -->|load templates & formula| PS
-    API -->|embeddings, keywords, memory ratio| LLM
+    API -->|embeddings, memory ratio| LLM
     LLM --> EP1
     LLM --> LP1
     BS -->|process events, topics, facts| API
@@ -77,7 +77,7 @@ flowchart LR
 ### High-level data flow
 
 1. The frontend/extension sends a new or edited message to Vistui with a `retrieve` flag.
-2. Vistui persists the message, computes its embedding and search keywords, and determines a memory ratio for retrieval (either via LLM or from ChatGroup config).
+2. Vistui persists the message, computes its embedding, and determines a memory ratio for retrieval (either via LLM or from ChatGroup config).
 3. If retrieval is requested, Vistui searches its memory (messages, events, topics, facts) using vector + BM25 search, ranks results, and packs them into a token-budgeted response.
 4. During idle periods, a single background worker processes older messages and consolidates them into events, topics, and facts. It also ensures embeddings and salience scores are computed for all messages.
 

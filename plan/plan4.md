@@ -292,7 +292,7 @@ Unit/integration test updates:
 
 - Retrieval quality tuning beyond the formula plumbing (prompt-based reranking, MMR…).
 - Stale-event cleanup after message edits (edit → requeue → new/extended event, old event remains).
-- Keywords extraction and LLM-computed `memory_ratio` (planned in earlier phases, still unimplemented).
+- LLM-computed `memory_ratio` (planned in earlier phases, still unimplemented; to be applied when the search gains its token budget — issue 002). Keywords extraction was removed on 2026-11-15: never wired (no caller, no storage, no consumer once BM25 indexes raw text).
 - Retry logic for failed messages (still mark + count only).
 - Ranking-formula editor UI / per-chatgroup search presets.
 - Cross-ChatGroup consolidation and provider hot-reloading.
@@ -308,6 +308,7 @@ Unit/integration test updates:
 - 2026-11-15: Ranking-formula RCE: interpreter fix implemented and verified, then reverted by decision back to plain `eval`; documented as issue 001 in `plan/issue.md`. See §9.
 - 2026-11-15: Middle step before 4.4/4.5: switched providers.yaml to the gomodel proxy (embedding via the `ollama_yople` upstream, LLM to `strata_toaster/iq3_xxs`), and validated the `d3:4b` decision model: it is System One-only (`/v1/systemone`, no chat completions) and gomodel cannot proxy that endpoint to ollama yet, so decisions go direct to `local-ollama`. See §9.
 - 2026-11-15: Decision-model support in code: `defaults.decision` key in providers.yaml (local-ollama/d3:4b) and `Provider.decide()` — a System One client with typed `ChoiceQuestion`/`NoulQuestion`/`ScoreQuestion` models, `DecisionAnswer` parsing, keep_alive passthrough and 8 hermetic tests. See §9.
+- 2026-11-15: Removed the never-wired `keywords` task (ChatGroupPrompts field, providers.yaml override, docs): no pipeline called it, nothing stored it, and BM25 indexes raw text. `memory_ratio` kept for the future search token-budget split (issue 002).
 
 ---
 

@@ -5,7 +5,7 @@
 Vistui needs two kinds of model calls:
 
 - **Embeddings** — dense vector representations of text.
-- **LLM completions / chat** — keyword extraction, memory ratio, salience scoring, and all batch consolidation prompts.
+- **LLM completions / chat** — memory ratio, salience scoring, and all batch consolidation prompts.
 
 Both are expected to be served by OpenAI-compatible APIs. This allows self-hosters to mix providers (e.g., local Ollama for embeddings, remote OpenAI-compatible API for LLM calls).
 
@@ -59,10 +59,6 @@ overrides:
     provider: "remote-llm"
     model: "gpt-4o-mini"
     temperature: 0.0
-  keywords:
-    provider: "remote-llm"
-    model: "gpt-4o-mini"
-    temperature: 0.1
   memory_ratio:
     provider: "remote-llm"
     model: "gpt-4o-mini"
@@ -127,7 +123,7 @@ class Provider:
     async def decide(self, state, questions: dict[str, SystemOneQuestion], keep_alive=None) -> dict[str, DecisionAnswer]: ...
 ```
 
-- `task` selects the override config (e.g., `salience`, `keywords`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`).
+- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`).
 - If no override exists for a task, the `defaults.llm` or `defaults.embedding` config is used.
 - The adapter parses the YAML and resolves `api_key_env` once at startup. The file can be reloaded on SIGHUP or via an admin endpoint.
 
@@ -149,7 +145,6 @@ class Provider:
 | Template | Inputs |
 |----------|--------|
 | `salience` | message text, role, ChatGroup description. |
-| `keywords` | message text, role, ChatGroup description. |
 | `memory_ratio` | message text, role, ChatGroup description. |
 | `event` | contiguous message block, existing event summary (if continuing). |
 | `topic_candidate` | existing topic summaries, new message, `max_topics_per_message`. |

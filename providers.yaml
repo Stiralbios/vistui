@@ -35,9 +35,6 @@ overrides:
   salience:
     provider: "gomodel"
     model: "strata_toaster/iq3_xxs"
-  keywords:
-    provider: "gomodel"
-    model: "strata_toaster/iq3_xxs"
   memory_ratio:
     provider: "gomodel"
     model: "strata_toaster/iq3_xxs"
