@@ -1,3 +1,5 @@
+"""Embedding computation for messages and for the memory objects derived from them."""
+
 from backend.batch.queries import BatchQueries
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO

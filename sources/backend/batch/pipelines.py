@@ -1,3 +1,10 @@
+"""LLM-driven pipelines that turn embedded messages into higher-level memories.
+
+Each pipeline's run_round processes one unit of work inside its own transaction and
+returns the number of messages handled, so the BatchWorker can call them repeatedly
+(and a crash never loses more than one round).
+"""
+
 import datetime as dt
 import uuid
 
@@ -18,12 +25,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class EventPipeline:
-    """Group contiguous messages into Events using the chat model."""
+    """Group contiguous messages of a chat into Events using the chat model.
+
+    Events are the coarsest memory unit: a block of consecutive messages summarized
+    together, with links back to each source message.
+    """
 
     BLOCK_SIZE = 10
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None) -> int:
+        """Process one block: take the oldest message waiting for the "event" stage and, in a
+        single LLM call, group it with up to BLOCK_SIZE contiguous embedded messages of the
+        same chat into events. Returns the number of messages processed, 0 if nothing to do."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "event")
@@ -54,6 +68,7 @@ class EventPipeline:
 
             groups = response.get("events", [])
             if not groups:
+                # LLM returned no grouping: fall back to one event covering the whole block.
                 groups = [{"summary": "General conversation block", "message_ids": [str(m.id) for m in block]}]
 
             for group in groups:
@@ -85,6 +100,7 @@ class EventPipeline:
 
     @staticmethod
     def _format_messages(messages: list[MessageDO]) -> str:
+        """Render messages as a bullet list so the LLM can reference them by id."""
         lines = []
         for m in messages:
             lines.append(f"- id: {m.id} | role: {m.role} | text: {m.full_text}")
@@ -92,10 +108,17 @@ class EventPipeline:
 
 
 class TopicPipeline:
-    """Create or update Topics for a single unprocessed message."""
+    """Create or update the chatgroup's Topics based on a single waiting message.
+
+    For each message, the nearest existing topics (by embedding similarity) are offered
+    to the LLM, which decides to create new topics or update/link existing ones.
+    """
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None) -> int:
+        """Process the oldest message waiting for the "topic" stage: ask the LLM for
+        create/update actions against the nearest topics, then apply them. Returns 1 if a
+        message was processed, else 0 (nothing waiting, or not yet embedded)."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "topic")
@@ -128,6 +151,7 @@ class TopicPipeline:
             if isinstance(response, list):
                 actions = response
             elif isinstance(response, dict):
+                # The LLM may answer with a bare list or wrap it in an "actions"/"topics" key.
                 actions = response.get("actions", []) or response.get("topics", []) or []
             for action in actions:
                 await cls._apply_action(session, chatgroup_id, message, action, existing_topics)
@@ -138,6 +162,7 @@ class TopicPipeline:
 
     @staticmethod
     async def _chatgroup_id(session: AsyncSession, chat_id: uuid.UUID) -> uuid.UUID | None:
+        """Resolve the chatgroup a chat belongs to (topics are scoped per chatgroup)."""
         chat = await session.get(ChatDO, chat_id)
         return chat.chatgroup_id if chat else None
 
@@ -148,6 +173,7 @@ class TopicPipeline:
         embedding: list[float],
         k: int,
     ) -> list[TopicDO]:
+        """Return the chatgroup's k topics closest (cosine) to the message embedding."""
         stmt = (
             select(TopicDO)
             .where(TopicDO.chatgroup_id == chatgroup_id)
@@ -166,6 +192,9 @@ class TopicPipeline:
         action: dict,
         existing_topics: list[TopicDO],
     ) -> None:
+        """Apply one LLM-decided action: create a new topic, or update an existing one and
+        link the message to it (updated topics get their embedding cleared, so they are
+        re-embedded on the next embedding round)."""
         action_type = action.get("action", "skip")
         now = dt.datetime.now(dt.timezone.utc)
 
@@ -195,10 +224,17 @@ class TopicPipeline:
 
 
 class FactPipeline:
-    """Create or update Facts for a single unprocessed message."""
+    """Create or update the chatgroup's Facts based on a single waiting message.
+
+    For each message, the nearest existing facts (by embedding similarity) are offered
+    to the LLM, which decides to create new facts or update/link existing ones.
+    """
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None) -> int:
+        """Process the oldest message waiting for the "fact" stage: ask the LLM for
+        create/update actions against the nearest facts, then apply them. Returns 1 if a
+        message was processed, else 0 (nothing waiting, or not yet embedded)."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "fact")
@@ -231,6 +267,7 @@ class FactPipeline:
             if isinstance(response, list):
                 actions = response
             elif isinstance(response, dict):
+                # The LLM may answer with a bare list or wrap it in an "actions"/"facts" key.
                 actions = response.get("actions", []) or response.get("facts", []) or []
             for action in actions:
                 await cls._apply_action(session, chatgroup_id, message, action, existing_facts)
@@ -241,6 +278,7 @@ class FactPipeline:
 
     @staticmethod
     async def _chatgroup_id(session: AsyncSession, chat_id: uuid.UUID) -> uuid.UUID | None:
+        """Resolve the chatgroup a chat belongs to (facts are scoped per chatgroup)."""
         chat = await session.get(ChatDO, chat_id)
         return chat.chatgroup_id if chat else None
 
@@ -251,6 +289,7 @@ class FactPipeline:
         embedding: list[float],
         k: int,
     ) -> list[FactDO]:
+        """Return the chatgroup's k facts closest (cosine) to the message embedding."""
         stmt = (
             select(FactDO)
             .where(FactDO.chatgroup_id == chatgroup_id)
@@ -269,6 +308,9 @@ class FactPipeline:
         action: dict,
         existing_facts: list[FactDO],
     ) -> None:
+        """Apply one LLM-decided action: create a new fact, or update an existing one and
+        link the message to it (updated facts get their embedding cleared, so they are
+        re-embedded on the next embedding round)."""
         action_type = action.get("action", "skip")
         now = dt.datetime.now(dt.timezone.utc)
 

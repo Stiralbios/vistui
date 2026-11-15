@@ -15,16 +15,26 @@ from loguru import logger
 
 
 class BatchWorker:
+    """Runs one consolidation round over all pipelines, in dependency order:
+    embeddings first, then the event/topic/fact LLM pipelines.
+
+    Progress is mirrored into `batch_status` for the admin API; a failing pipeline marks
+    the message it was working on as FAILED without blocking the remaining pipelines.
+    """
+
     def __init__(self) -> None:
         self.should_stop = False
         self.provider: Provider | None = None
 
     async def get_provider(self) -> Provider:
+        """Lazily create and cache the LLM provider shared by all pipelines of this worker."""
         if self.provider is None:
             self.provider = Provider()
         return self.provider
 
     async def run_round(self) -> None:
+        """Run each pipeline exactly once, each in its own transaction, and refresh the
+        queue depth before and after so the admin status stays accurate."""
         provider = await self.get_provider()
 
         batch_status.running = True
@@ -35,6 +45,7 @@ class BatchWorker:
             async with get_async_sessionmaker()() as session, session.begin():
                 batch_status.queue_depth = await BatchQueries.count_waiting_messages(session)
 
+            # (name used for status/logs, processing_state key to peek/mark, async callable)
             pipelines: list[tuple[str, str, Callable[..., Awaitable[Any]]]] = [
                 ("embedding", "embedding", embed_messages),
                 ("memory_embedding", "memory_embedding", embed_memory_objects),
@@ -73,6 +84,8 @@ class BatchWorker:
 
     @staticmethod
     async def _peek_message_id(state_key: str) -> uuid.UUID | None:
+        """Return the id of the next message waiting for this stage (None for the embedding
+        stages, which operate on batches rather than a single message)."""
         if state_key in ("embedding", "memory_embedding"):
             return None
         async with get_async_sessionmaker()() as session, session.begin():
@@ -81,6 +94,8 @@ class BatchWorker:
 
     @staticmethod
     async def _mark_failed(message_id: uuid.UUID, state_key: str) -> None:
+        """Flag the stage as FAILED on the message and record retry metadata (retry_count,
+        last_failure_at) in its processing_state."""
         async with get_async_sessionmaker()() as session, session.begin():
             message = await session.get(MessageDO, message_id)
             if message is None:

@@ -1,3 +1,9 @@
+"""Periodic scheduling of the batch worker via APScheduler.
+
+The interval is set by VISTUI_BATCH_INTERVAL_SECONDS and jobs are persisted in the
+database (apscheduler_jobs table) so they are not duplicated across restarts.
+"""
+
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from backend.batch.worker import BatchWorker
@@ -16,6 +22,7 @@ def _sync_database_url() -> str:
 
 
 def get_scheduler() -> AsyncIOScheduler:
+    """Return the global scheduler, creating it (with its DB-backed job store) on first call."""
     global _scheduler
     if _scheduler is None:
         job_store_url = _sync_database_url()
@@ -32,6 +39,8 @@ def get_scheduler() -> AsyncIOScheduler:
 
 
 def start_scheduler() -> None:
+    """Register the periodic batch round (if not already registered) and start the scheduler.
+    Safe to call on every app startup."""
     scheduler = get_scheduler()
     interval = AppSettings().VISTUI_BATCH_INTERVAL_SECONDS
     if scheduler.get_job("batch_round") is None:
@@ -47,6 +56,7 @@ def start_scheduler() -> None:
 
 
 def stop_scheduler() -> None:
+    """Shut the scheduler down without waiting for running jobs, and reset the global."""
     global _scheduler
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
@@ -54,6 +64,7 @@ def stop_scheduler() -> None:
 
 
 async def _run_worker_round() -> None:
+    """APScheduler callback: run one full BatchWorker round, then flag it to stop."""
     worker = BatchWorker()
     try:
         await worker.run_round()

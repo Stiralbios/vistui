@@ -1,3 +1,9 @@
+"""Reusable DB queries for the batch worker.
+
+They center on MessageDO.processing_state, a JSONB dict mapping each pipeline stage
+("embedding", "event", "topic", "fact") to a ProcessingStatus value.
+"""
+
 import datetime as dt
 import uuid
 from typing import Any, Protocol, TypeVar
