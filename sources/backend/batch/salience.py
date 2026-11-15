@@ -5,13 +5,16 @@ the decision model (an ollama System One model such as ``d3:4b``, called through
 ``Provider.decide``) as a `score` question against a fixed rubric: the answer's
 probability-weighted rubric index is normalized by the number of levels minus one.
 
+Every element is scored in its own decide() call, element per element like the other
+batch stages: the state carries the chatgroup description plus the single message or
+memory object, and one question named "salience".
+
 ChatGroups with ``use_salience`` false or null opt out: their rows keep
 ``salience_score = NULL`` (nothing is fabricated) and the search formula passes the
 neutral 1.0 for them (see ``backend.search.service``).
 """
 
 import uuid
-from collections.abc import Iterator
 from typing import Protocol, TypeVar
 
 from backend.batch.queries import BatchQueries
@@ -40,18 +43,15 @@ SALIENCE_RUBRIC = [
     "Critical: core information - decisions, key people, dates, commitments.",
 ]
 
-# Questions per decide() call. Every question is scored against the whole shared
-# state, so call latency grows superlinearly with the batch size (measured: 3
-# questions on a 3-message state take ~38s with d3:4b): chunks must stay well under
-# the provider timeout.
-CHUNK_SIZE = 5
-
-# Keep the decision model loaded between batch rounds.
+# Keep the decision model loaded between the per-element calls of a round.
 KEEP_ALIVE = "10m"
 
 # Decision task name, resolved against the providers.yaml overrides by
 # Provider.decide (falling back to defaults.decision).
 SALIENCE_TASK = "salience"
+
+# Name of the single score question asked in each decide() call.
+QUESTION_NAME = "salience"
 
 
 class _Salient(Protocol):
@@ -63,12 +63,6 @@ class _Salient(Protocol):
 
 
 S = TypeVar("S", bound=_Salient)
-C = TypeVar("C")
-
-
-def _chunks(items: list[C], size: int) -> Iterator[list[C]]:
-    for start in range(0, len(items), size):
-        yield items[start : start + size]
 
 
 def _use_salience(chatgroup: ChatGroupDO) -> bool:
@@ -81,10 +75,10 @@ def _chatgroup_prompt(chatgroup: ChatGroupDO) -> str:
     return chatgroup.prompts.get("salience") or ChatGroupPrompts().salience
 
 
-def _question(prompt: str, kind: str, object_id: uuid.UUID) -> ScoreQuestion:
-    """Build the score question for one object of the shared state."""
+def _question(prompt: str, kind: str) -> ScoreQuestion:
+    """Build the score question for the single element of the state."""
     return ScoreQuestion(
-        instructions=f"{prompt} Judge the {kind} with id {object_id} in the state.",
+        instructions=f"{prompt} Judge the {kind} in the state.",
         criteria=SALIENCE_RUBRIC,
     )
 
@@ -117,31 +111,28 @@ async def _load_chatgroups(
     return {chatgroup.id: chatgroup for chatgroup in res.scalars().all()}
 
 
-async def _score_texts(
+async def _score_element(
     provider: Provider,
     chatgroup: ChatGroupDO,
     kind: str,
-    entries: list[tuple[str, dict[str, str]]],
-) -> dict[str, float]:
-    """Score texts with the decision model: one shared state per chatgroup, one decide
-    call per CHUNK_SIZE questions. `entries` pairs the question name with the state
-    entry fields; returns question name -> salience in [0, 1]."""
-    prompt = _chatgroup_prompt(chatgroup)
-    state = {
-        "chatgroup": chatgroup.description,
-        f"{kind}s": [{"id": name, **fields} for name, fields in entries],
-    }
-    scores: dict[str, float] = {}
-    for chunk in _chunks(entries, CHUNK_SIZE):
-        questions = {name: _question(prompt, kind, uuid.UUID(name)) for name, _ in chunk}
-        answers = await provider.decide(state, questions, task=SALIENCE_TASK, keep_alive=KEEP_ALIVE)
-        for name, _ in chunk:
-            scores[name] = _normalize(answers[name])
-    return scores
+    fields: dict[str, str],
+) -> float:
+    """Score one element with the decision model: a single decide() call whose state
+    carries the chatgroup description plus the element itself. Returns the salience in
+    [0, 1]."""
+    state = {"chatgroup": chatgroup.description, kind: fields}
+    answers = await provider.decide(
+        state,
+        {QUESTION_NAME: _question(_chatgroup_prompt(chatgroup), kind)},
+        task=SALIENCE_TASK,
+        keep_alive=KEEP_ALIVE,
+    )
+    return _normalize(answers[QUESTION_NAME])
 
 
 class SaliencePipeline:
-    """Score the oldest waiting messages with the decision model.
+    """Score the oldest waiting messages with the decision model, one decide() call per
+    message.
 
     The stage runs for every message, protected window included (like the embedding
     stage). Opted-out chatgroups only get their `salience` flag marked done: the
@@ -177,12 +168,13 @@ class SaliencePipeline:
                     total += len(group_messages)
                     continue
 
-                entries = [
-                    (str(message.id), {"role": message.role, "text": message.full_text}) for message in group_messages
-                ]
-                scores = await _score_texts(provider, chatgroup, "message", entries)
                 for message in group_messages:
-                    message.salience_score = scores[str(message.id)]
+                    message.salience_score = await _score_element(
+                        provider,
+                        chatgroup,
+                        "message",
+                        {"role": message.role, "text": message.full_text},
+                    )
                     message.processing_state = {**message.processing_state, "salience": ProcessingStatus.DONE}
                 total += len(group_messages)
 
@@ -197,8 +189,8 @@ async def _score_objects(
     group_ids: dict[uuid.UUID, uuid.UUID],
     kind: str,
 ) -> int:
-    """Score NULL-salience memory objects of one model, grouped by chatgroup. Objects
-    of opted-out chatgroups are skipped and keep their NULL score."""
+    """Score NULL-salience memory objects of one model, one decide() call per object.
+    Objects of opted-out chatgroups are skipped and keep their NULL score."""
     if not objects:
         return 0
 
@@ -212,10 +204,8 @@ async def _score_objects(
         chatgroup = chatgroups[chatgroup_id]
         if not _use_salience(chatgroup):
             continue
-        entries = [(str(obj.id), {"text": obj.full_text}) for obj in group_objects]
-        scores = await _score_texts(provider, chatgroup, kind, entries)
         for obj in group_objects:
-            obj.salience_score = scores[str(obj.id)]
+            obj.salience_score = await _score_element(provider, chatgroup, kind, {"text": obj.full_text})
         scored += len(group_objects)
 
     if scored:

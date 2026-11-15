@@ -9,7 +9,7 @@ from backend.batch import BatchWorker, batch_status
 from backend.batch.embeddings import embed_memory_objects, embed_messages
 from backend.batch.pipelines import EventPipeline, FactPipeline, TopicPipeline
 from backend.batch.queries import BatchQueries
-from backend.batch.salience import CHUNK_SIZE, SALIENCE_RUBRIC, SaliencePipeline, score_memory_objects
+from backend.batch.salience import SALIENCE_RUBRIC, SaliencePipeline, score_memory_objects
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
 from backend.chatgroup.schemas import ChatGroupConfig, ChatGroupPrompts
@@ -183,9 +183,9 @@ async def test_embed_messages():
 
 
 async def test_salience_pipeline_scores_messages():
-    """Messages are scored with the decision model in one decide call per chatgroup:
-    rubric answers normalize to 0..1, the stage is marked done, and the questions and
-    the shared state are keyed by message id."""
+    """Each message is scored in its own decide() call, element per element: the state
+    carries the chatgroup description plus the single message, one score question,
+    rubric answers normalized to 0..1, stage marked done."""
     calls: list[dict] = []
     async with get_async_sessionmaker()() as session, session.begin():
         _, chat = await _make_test_chat(session)
@@ -198,15 +198,17 @@ async def test_salience_pipeline_scores_messages():
         handled = await SaliencePipeline.run_round()
 
     assert handled == 3
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["task"] == "salience"
-    assert call["keep_alive"] == "10m"
-    assert set(call["questions"]) == {str(message.id) for message in messages}
-    question = call["questions"][str(messages[0].id)]
-    assert question.criteria == SALIENCE_RUBRIC
-    assert question.instructions.startswith("Assign a salience score between 0 and 1 to the message.")
-    assert [entry["id"] for entry in call["state"]["messages"]] == [str(message.id) for message in messages]
+    assert len(calls) == 3
+    for call, message in zip(calls, messages, strict=True):
+        assert call["task"] == "salience"
+        assert call["keep_alive"] == "10m"
+        assert set(call["questions"]) == {"salience"}
+        question = call["questions"]["salience"]
+        assert question.criteria == SALIENCE_RUBRIC
+        assert question.instructions.startswith("Assign a salience score between 0 and 1 to the message.")
+        assert question.instructions.endswith("Judge the message in the state.")
+        assert call["state"]["message"] == {"role": message.role, "text": message.full_text}
+        assert "chatgroup" in call["state"]
 
     async with get_async_sessionmaker()() as session, session.begin():
         for message in messages:
@@ -216,9 +218,8 @@ async def test_salience_pipeline_scores_messages():
             assert updated.processing_state["salience"] == ProcessingStatus.DONE
 
 
-async def test_salience_pipeline_limits_and_chunks():
-    """At most `limit` messages are handled per round, in decide calls of at most
-    CHUNK_SIZE questions."""
+async def test_salience_pipeline_respects_limit():
+    """At most `limit` messages are handled per round, one decide() call per message."""
     async with get_async_sessionmaker()() as session, session.begin():
         _, chat = await _make_test_chat(session)
         for i in range(12):
@@ -228,7 +229,8 @@ async def test_salience_pipeline_limits_and_chunks():
     with patch.object(Provider, "decide", _fake_decide(calls=calls)):
         assert await SaliencePipeline.run_round(limit=10) == 10
         assert await SaliencePipeline.run_round(limit=10) == 2
-    assert [len(call["questions"]) for call in calls] == [CHUNK_SIZE, CHUNK_SIZE, 2]
+    assert len(calls) == 12  # one call per scored message
+    assert all(len(call["questions"]) == 1 for call in calls)
 
 
 @pytest.mark.parametrize("use_salience", [None, False])
@@ -280,8 +282,8 @@ async def test_salience_missing_answer_score_rolls_back():
 
 async def test_score_memory_objects():
     """Events, topics and facts with a NULL salience are scored from their full_text,
-    one decide call per model per chatgroup; opted-out chatgroups keep NULL and make
-    no decision call."""
+    one decide() call per object; opted-out chatgroups keep NULL and make no decision
+    call."""
     calls: list[dict] = []
     async with get_async_sessionmaker()() as session, session.begin():
         chatgroup_in, chat_in = await _make_test_chat(session)
@@ -309,8 +311,9 @@ async def test_score_memory_objects():
 
     with patch.object(Provider, "decide", _fake_decide(score=1.0, calls=calls)):
         assert await score_memory_objects() == 3
-    assert len(calls) == 3  # event + topic + fact; the opted-out chatgroup makes no call
-    assert sorted(next(iter(set(call["state"]) - {"chatgroup"})) for call in calls) == ["events", "facts", "topics"]
+    assert len(calls) == 3  # one call per object; the opted-out chatgroup makes no call
+    assert sorted(next(iter(set(call["state"]) - {"chatgroup"})) for call in calls) == ["event", "fact", "topic"]
+    assert all(set(call["questions"]) == {"salience"} for call in calls)
 
     async with get_async_sessionmaker()() as session, session.begin():
         for obj_id, model in ((event_in.id, EventDO), (topic_in.id, TopicDO), (fact_in.id, FactDO)):

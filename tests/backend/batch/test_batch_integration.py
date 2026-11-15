@@ -5,7 +5,7 @@ lifespan (which seeds the 30 demo messages on startup, like a normal app start w
 VISTUI_SEED_DEMO=1), then real batch worker rounds are triggered through the admin
 API and the consolidation results are checked in the database.
 
-These tests are slow (each round runs a real embedding batch, two batched salience
+These tests are slow (each round runs a real embedding batch, per-element salience
 decision calls against the decision model, and one real LLM call per consolidation
 pipeline — several minutes per round with the local models) and need a reachable
 provider as configured in providers.yaml. They are opt-in: run them with
@@ -37,10 +37,10 @@ pytestmark = [
     ),
 ]
 
-# Each round runs one embedding batch, salience decision calls (10 messages in chunks
-# of 5) plus one real LLM call per pipeline (event, topic, fact), so a round takes
-# several minutes with the real providers: keep the default low and override with
-# VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
+# Each round runs one embedding batch, one salience decision call per scored message
+# (up to 10 per round) plus one real LLM call per pipeline (event, topic, fact), so a
+# round takes several minutes with the real providers: keep the default low and
+# override with VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
 MAX_ROUNDS = int(os.environ.get("VISTUI_INTEGRATION_MAX_ROUNDS", "2"))
 EMBEDDING_DIMENSIONS = get_provider_config().defaults.embedding.dimensions
 

@@ -173,10 +173,12 @@ conversational text.
 - Answers come back as `DecisionAnswer` objects keyed by the question names; answers never
   feed later questions (each is scored independently).
 - `keep_alive` keeps the model loaded between batch requests (duration string or seconds).
-- Decision calls are slow: `d3:4b` takes ~10s per question, and every question is scored
-  against the whole state, so batched calls grow superlinearly. The salience stages send
-  at most 5 questions per call and give the decision provider a generous
-  `timeout_seconds` (300 in the dev config; only decision calls use `local-ollama`).
+- Decision calls are slow: `d3:4b` takes ~5-10s per scored question, and every question
+  is scored against the whole state. The salience stages score element per element —
+  one `decide()` call per message or memory object, state = chatgroup description plus
+  the single element — and give the decision provider a generous `timeout_seconds`
+  (300 in the dev config, which also covers the cold model load; only decision calls
+  use `local-ollama`).
 - Routing caveat: gomodel does not forward `/v1/systemone` to ollama upstreams, so the
   decision provider must be a directly reachable ollama (`local-ollama` in the dev config).
 
@@ -206,4 +208,6 @@ conversational text.
 - 2026-07-11: Initial LLM provider design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: split `fact` task into `fact_candidate` and `fact_update`, split `topic` task into `topic_candidate` and `topic_update`.
 - 2026-11-15: Added `defaults.decision` and `Provider.decide()` for System One decision models (`/v1/systemone`): typed `choice`/`noul`/`score` questions, probability answers, direct-ollama routing only.
-- 2026-11-15: Plan 4.4 — `decide()` gained the `task` parameter (overrides map now serves decision tasks too); the batch salience stages score messages and memory objects with `d3:4b` against a 5-level rubric in chunks of 5 questions, `keep_alive` keeps the model warm between rounds.
+- 2026-11-15: Salience stages switched from batched calls (chunked at 5 questions) to
+  element-per-element scoring — one `decide()` call per message / memory object.
+- 2026-11-15: Plan 4.4 — `decide()` gained the `task` parameter (overrides map now serves decision tasks too); the salience stages score messages and memory objects with `d3:4b` against a 5-level rubric, `keep_alive` keeps the model warm between rounds.

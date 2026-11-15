@@ -75,7 +75,7 @@ def _fake_decide():
     messages through its lower salience, exercising the formula's salience factor."""
 
     async def decide(self, state, questions, task=None, keep_alive=None):
-        score = 4.0 if "messages" in state else 2.0
+        score = 4.0 if "message" in state else 2.0
         return {name: DecisionAnswer(type="score", score=score) for name in questions}
 
     return decide

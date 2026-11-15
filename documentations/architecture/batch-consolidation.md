@@ -92,12 +92,10 @@ Salience is scored by the **decision model** (an ollama System One model such as
 
 1. Select the oldest messages with `salience = waiting` (up to 10 per round, oldest
    first), grouped by chatgroup.
-2. For each chatgroup, score the group's messages in one `decide()` call: the shared
-   state carries the chatgroup description plus each message (id, role, text), and one
-   `score` question per message is asked against a fixed 5-level rubric (trivial →
-   critical), keyed by the message id. Calls are chunked to at most 5 questions each
-   because every question is scored against the whole state, so latency grows
-   superlinearly with the batch size.
+2. For each message, one `decide()` call (element per element, like the other batch
+   stages): the state carries the chatgroup description plus the single message
+   (role, text), and one `score` question named `salience` is asked against a fixed
+   5-level rubric (trivial → critical).
 3. Normalize the probability-weighted rubric index to `[0, 1]` (divide by the number
    of rubric levels minus one) and store it as `salience_score`.
 4. Mark `salience = done`.
@@ -278,4 +276,8 @@ Status response:
 - 2026-07-11: Initial batch consolidation design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: added embedding/salience as prerequisite batch pipelines, sequential per-message event→topic→fact ordering, event LLM can return multiple events, `fact_candidate` can create new facts, `fact_update` only updates existing facts.
 
-- 2026-11-15: Salience is now scored by the decision model (`d3:4b` via System One, plan 4.4): batched `decide()` calls with a 5-level rubric for messages and memory objects, opted-out chatgroups keep `salience_score` NULL with neutral salience at search time, and the documented embedding+salience-done gate for consolidation is enforced in the queries.
+- 2026-11-15: Salience scoring switched from batched `decide()` calls (one call per
+  chatgroup, chunked at 5 questions) to element-per-element scoring (one call per
+  message / memory object, state = chatgroup description + the single element) —
+  simpler, and a 10-message round drops from ~4 min to ~90s with `d3:4b`.
+- 2026-11-15: Salience is now scored by the decision model (`d3:4b` via System One, plan 4.4): `decide()` calls with a 5-level rubric for messages and memory objects, opted-out chatgroups keep `salience_score` NULL with neutral salience at search time, and the documented embedding+salience-done gate for consolidation is enforced in the queries.

@@ -3,7 +3,8 @@ providers:
     base_url: "http://192.168.9.137:11434/v1"
     api_key_env: "OLLAMA_API_KEY"
     # Only decision (System One) calls use this provider now, and they are slow:
-    # d3:4b takes ~10s per scored question, so chunks of 5 need minutes of headroom.
+    # d3:4b takes ~5-10s per scored element (one decide call per message/object),
+    # and 300s also covers the cold model load on the first call of a burst.
     timeout_seconds: 300
   # gomodel is an OpenAI-compatible proxy in front of several ollama upstreams:
   #   - "ollama_yople/*": our own ollama box (same host as local-ollama, reached via the proxy)
