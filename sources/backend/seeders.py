@@ -140,7 +140,11 @@ async def seed_demo_chat() -> dict:
         await session.flush()
 
         prev_id: uuid.UUID | None = None
-        created_at = dt.datetime.now(dt.timezone.utc)
+        # Stamp the demo conversation into the past (one message per second, ending ~10s
+        # before now): created_at must never be in the future, otherwise updated_at — set
+        # by the DB clock when the worker later embeds/consolidates the message — would
+        # land before created_at.
+        created_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=len(_DEMO_MESSAGES) + 10)
         for role, text in _DEMO_MESSAGES:
             message = MessageDO(
                 id=uuid.uuid4(),
@@ -148,6 +152,9 @@ async def seed_demo_chat() -> dict:
                 prev_message_id=prev_id,
                 full_text=text,
                 role=role,
+                # Neutral placeholder, same 0.5 the pipelines hardcode for events/topics/
+                # facts: Phase 3 short-circuits real salience scoring (marked done).
+                salience_score=0.5,
                 processing_state=_default_processing_state(),
                 created_at=created_at,
             )

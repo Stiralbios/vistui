@@ -33,10 +33,11 @@ async def test_engine(test_database_url):
 
     yield engine
 
+    # The data is intentionally kept after the session for inspection (browse the
+    # vistui_postgres_test container in Adminer); the next test run starts by dropping
+    # and recreating every table anyway.
     database_module._engine_instance = None
     database_module._async_sessionmaker = None
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
 
 

@@ -1,3 +1,4 @@
+import datetime as dt
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -77,14 +78,18 @@ def fake_langchain_client():
         yield
 
 
-async def _make_test_chat(session):
+async def _make_test_chat(session, protected_message_count: int = 0):
+    """Create a test chatgroup + chat. The protected window defaults to 0 so test
+    chats consolidate fully unless a test opts into a window explicitly."""
     user = await session.scalar(select(UserDO).where(UserDO.email == "test@example.com"))
     assert user is not None
+    config = ChatGroupConfig().model_dump()
+    config["protected_message_count"] = protected_message_count
     chatgroup = ChatGroupDO(
         id=uuid.uuid4(),
         user_id=user.id,
         name="Test ChatGroup",
-        config=ChatGroupConfig().model_dump(),
+        config=config,
         prompts=ChatGroupPrompts().model_dump(),
         ranking_formula="lambda vector_score, bm25_score, salience, linked_count: vector_score",
     )
@@ -100,7 +105,9 @@ async def _make_test_chat(session):
     return chatgroup, chat
 
 
-async def _add_message(session, chat_id, full_text, role=MessageRole.USER, prev_id=None, state=None):
+async def _add_message(session, chat_id, full_text, role=MessageRole.USER, prev_id=None, state=None, created_at=None):
+    """Insert one waiting message; created_at is set client-side (distinct per call)
+    because the column's server default is the transaction timestamp."""
     message = MessageDO(
         id=uuid.uuid4(),
         chat_id=chat_id,
@@ -108,6 +115,7 @@ async def _add_message(session, chat_id, full_text, role=MessageRole.USER, prev_
         full_text=full_text,
         role=role,
         embedding=None,
+        created_at=created_at or dt.datetime.now(dt.timezone.utc),
         processing_state=state
         or {
             "embedding": ProcessingStatus.WAITING,
@@ -270,6 +278,55 @@ async def test_fact_pipeline():
             .all()
         )
         assert len(links) == 1
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_protected_window_skips_recent_messages():
+    """The `protected_message_count` most recent messages are skipped by event/topic/fact
+    consolidation, but the embedding stage still processes them."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        chatgroup, chat = await _make_test_chat(session, protected_message_count=5)
+        base = dt.datetime.now(dt.timezone.utc)
+        messages = []
+        for i in range(12):
+            messages.append(
+                await _add_message(
+                    session,
+                    chat.id,
+                    f"Protected window message {i}",
+                    created_at=base + dt.timedelta(seconds=i),
+                )
+            )
+
+    # Embedding ignores the protected window: all 12 messages are embedded.
+    assert await embed_messages() == 12
+
+    # The event block only reaches the 7 messages outside the window.
+    assert await EventPipeline.run_round() == 7
+    assert await EventPipeline.run_round() == 0  # remaining candidates are all protected
+
+    # Topic/fact stages process the oldest non-protected message, one per round.
+    assert await TopicPipeline.run_round() == 1
+    assert await FactPipeline.run_round() == 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        first = await session.get(MessageDO, messages[0].id)
+        assert first is not None
+        assert first.processing_state["topic"] == ProcessingStatus.DONE
+        assert first.processing_state["fact"] == ProcessingStatus.DONE
+
+        for i, message in enumerate(messages):
+            updated = await session.get(MessageDO, message.id)
+            assert updated is not None
+            assert updated.embedding is not None, "embedding must not respect the window"
+            assert updated.processing_state["embedding"] == ProcessingStatus.DONE
+            if i < 7:
+                assert updated.processing_state["event"] == ProcessingStatus.DONE
+            else:
+                # Last 5 messages: inside the protected window, consolidation flags untouched.
+                assert updated.processing_state["event"] == ProcessingStatus.WAITING
+                assert updated.processing_state["topic"] == ProcessingStatus.WAITING
+                assert updated.processing_state["fact"] == ProcessingStatus.WAITING
 
 
 @pytest.mark.usefixtures("fake_langchain_client")

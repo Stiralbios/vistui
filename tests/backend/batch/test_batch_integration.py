@@ -15,6 +15,7 @@ import os
 import pytest
 from backend.batch import batch_status
 from backend.chat.models import ChatDO
+from backend.chatgroup.models import ChatGroupDO
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO, EventMessageLinkDO
 from backend.fact.models import FactDO
@@ -47,6 +48,9 @@ async def _queue_depth(client: AsyncClient) -> int:
     return response.json()["queue_depth"]
 
 
+PROTECTED_COUNT = 5
+
+
 def _assert_real_embedding(obj) -> None:
     assert obj.embedding is not None, "embedding should have been computed by the real provider"
     assert len(obj.embedding) == EMBEDDING_DIMENSIONS
@@ -62,6 +66,11 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
         async with get_async_sessionmaker()() as session, session.begin():
             chat = await session.scalar(select(ChatDO).where(ChatDO.name == "Demo Chat"))
             assert chat is not None, "app startup (VISTUI_SEED_DEMO=1) should have seeded the demo chat"
+            chatgroup = await session.scalar(select(ChatGroupDO).where(ChatGroupDO.id == chat.chatgroup_id))
+            assert chatgroup is not None
+            # Shrink the protected window (default 10) to 5: the 25 oldest messages are
+            # eligible for consolidation, the 5 most recent must stay untouched.
+            chatgroup.config = {**chatgroup.config, "protected_message_count": PROTECTED_COUNT}
 
         assert await _queue_depth(client) == 30
 
@@ -111,6 +120,15 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             for message in messages[:MAX_ROUNDS]:
                 assert message.processing_state["topic"] == ProcessingStatus.DONE
                 assert message.processing_state["fact"] == ProcessingStatus.DONE
+
+            # Protected window: the 5 most recent messages keep their consolidation flags
+            # waiting (they become eligible only as the chat grows)...
+            for message in messages[-PROTECTED_COUNT:]:
+                assert message.processing_state["event"] == ProcessingStatus.WAITING
+                assert message.processing_state["topic"] == ProcessingStatus.WAITING
+                assert message.processing_state["fact"] == ProcessingStatus.WAITING
+                # ...but the embedding stage ignores the window.
+                assert message.processing_state["embedding"] == ProcessingStatus.DONE
 
             # Events: at least one per round (the pipeline falls back to a single group),
             # each linked to at least one source message, with a coherent time range.

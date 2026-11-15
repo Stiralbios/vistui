@@ -54,9 +54,10 @@ class EventPipeline:
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None) -> int:
-        """Process one block: take the oldest message waiting for the "event" stage and, in a
-        single LLM call, group it with up to BLOCK_SIZE contiguous embedded messages of the
-        same chat into events. Returns the number of messages processed, 0 if nothing to do."""
+        """Process one block: take the oldest message waiting for the "event" stage
+        outside its chat's protected window and, in a single LLM call, group it with up to
+        BLOCK_SIZE contiguous embedded, non-protected messages of the same chat into events.
+        Returns the number of messages processed, 0 if nothing to do."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "event")
@@ -134,9 +135,10 @@ class TopicPipeline:
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None) -> int:
-        """Process the oldest message waiting for the "topic" stage: ask the LLM for
-        create/update actions against the nearest topics, then apply them. Returns 1 if a
-        message was processed, else 0 (nothing waiting, or not yet embedded)."""
+        """Process the oldest message waiting for the "topic" stage outside its chat's
+        protected window: ask the LLM for create/update actions against the nearest topics,
+        then apply them. Returns 1 if a message was processed, else 0 (nothing waiting,
+        not yet embedded, or protected)."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "topic")
@@ -244,9 +246,10 @@ class FactPipeline:
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None) -> int:
-        """Process the oldest message waiting for the "fact" stage: ask the LLM for
-        create/update actions against the nearest facts, then apply them. Returns 1 if a
-        message was processed, else 0 (nothing waiting, or not yet embedded)."""
+        """Process the oldest message waiting for the "fact" stage outside its chat's
+        protected window: ask the LLM for create/update actions against the nearest facts,
+        then apply them. Returns 1 if a message was processed, else 0 (nothing waiting,
+        not yet embedded, or protected)."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "fact")
