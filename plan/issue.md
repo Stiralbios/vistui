@@ -119,3 +119,8 @@ by design — no flag is needed to say "done"). Messages can work the same way:
 As built today the two keys still drive that gate, the queue count and the admin
 status, so this is a recorded future simplification — not implemented for now
 (user decision 2026-11-15). See `plan/plan4.md` §9 for the as-built state machine.
+
+
+## Issue 004 — message send for salience should be configurable
+
+To tweak how it answers
