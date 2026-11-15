@@ -1,0 +1,353 @@
+# Vistui Phase 4: Model Upgrades, Event Continuity, BM25 Search, Salience
+
+**Goal:** Switch the embedding model to `embeddinggemma-2:740m`, make the last Event of a chat a living summary that grows with the conversation (never touching the protected window), replace the dead `search_vector` column with ParadeDB BM25 indexes over raw text, add real salience scoring with the `d3:4b` decision model, and split consolidation into a cheap decision step (`d3:4b`) followed by a generation step (`gemma4:e4b`).
+
+**Scope focus:** retrieval quality is not the goal of this phase — but a minimal hybrid search endpoint ships as the validation vehicle for everything else (embedding A/B, salience scores, BM25 indexes, ranking formula).
+
+---
+
+## 1. Decisions
+
+| Topic | Decision |
+|-------|----------|
+| Embedding model | `embeddinggemma-2:740m` (natively 768-dim — matches `Vector(768)` schema; no truncation parameter needed). Measured warm on the current CPU-only Ollama host: ~0.10s vs ~1.69s per query for `qwen3-embedding:8b` (~17× faster). Switch is config-only (`providers.yaml`); revert by pointing back at `qwen3-embedding:8b`. |
+| Existing vectors | Embeddings from different models are not comparable: switching requires re-embedding everything. New admin endpoint `POST /admin/reembed` nulls all vectors and requeues them; the worker refills over the next rounds. |
+| Event continuity | The most recent Event of a chat is **edited/extended** when the next eligible block continues it, instead of always creating a new Event. Decision (extend vs new block) by `d3:4b`; rewritten summary by `gemma4:e4b`. |
+| Protected window | Unchanged invariant: the `protected_message_count` (default 10) most recent messages of a chat never enter an Event until they leave the window (already enforced by `_is_outside_protected_window()` in `queries.py`). Extension only ever touches eligible messages. |
+| BM25 | ParadeDB `bm25` index over the raw `full_text` column (tokenization is handled by the index; rows are indexed automatically on insert/update). The `search_vector` TSVECTOR column is **dropped**: nothing ever wrote it, and hybrid fusion already happens at the ranking-formula level (`vector_score`, `bm25_score`), so a separate Postgres-native tsvector is redundant. Re-add later only if Postgres-native `ts_rank` scoring is ever needed. |
+| Salience | Real scoring via `d3:4b`: new batch stage scores messages (and memory objects) 0.0–1.0. The Phase 3 short-circuit is removed: the seeder no longer pre-marks salience `done` and no longer hardcodes `0.5`. `ChatGroupConfig.use_salience = false` keeps the old short-circuit behavior (mark done, placeholder 0.5). |
+| Decision model | `d3:4b` handles all create/update/skip decisions (topic candidates, fact candidates, event grouping boundaries, extend-vs-new). `gemma4:e4b` writes all summaries. This maps onto the existing prompt/task split (`topic_candidate` vs `topic_update`, `fact_candidate` vs `fact_update`). |
+| Failure handling | Decision calls that return nothing parseable degrade to a safe default (extend → new; candidate → skip) and the message still completes. Generation failures keep the existing worker semantics (mark failed, count, retry count). |
+| Per-task models | `providers.yaml` overrides updated: `salience`, `topic_candidate`, `fact_candidate`, `event_decision` (new task) → `d3:4b`; `event`, `topic_update`, `fact_update` → `gemma4:e4b`. |
+
+---
+
+## 2. Dependencies
+
+No new Python dependencies — `sqlalchemy-paradedb>=0.13.0` already ships everything needed:
+
+- `paradedb.ParadeDBField` / `paradedb.IndexOptions` — BM25 index DDL (models + alembic)
+- `paradedb.all/term/phrase/parse` — BM25 predicates; `paradedb.score` — BM25 relevance score
+- `paradedb.cosine_distance` — already used for vector search
+
+Ollama models required on `http://192.168.9.137:11434/v1` (both already pulled, verified via `/v1/models`):
+
+- `embeddinggemma-2:740m` — embeddings (768-dim)
+- `d3:4b` — decision model (salience + create/update/skip decisions)
+
+---
+
+## 3. File plan
+
+### New files
+
+```
+sources/backend/batch/salience.py     # SaliencePipeline (messages) + score_memory_objects
+sources/backend/search/
+  __init__.py
+  apis.py                            # GET /chatgroups/{id}/search — hybrid vector+BM25
+  schemas.py                         # SearchQuery, SearchHit models
+  scoring.py                         # ranking_formula evaluation + score normalization
+
+migrations/versions/0003_bm25_indexes.py   # create BM25 indexes, drop search_vector
+```
+
+### Modified files
+
+```
+providers.yaml                       # embedding model + per-task decision model overrides
+sources/backend/llm/prompts.py       # SALIENCE, EVENT_DECISION, EVENT_SUMMARY,
+                                      # TOPIC_CANDIDATE (decisions only), TOPIC_UPDATE, etc.
+sources/backend/chatgroup/schemas.py # updated default prompt texts
+sources/backend/batch/pipelines.py   # event extension, decide/generate split, no 0.5 hardcode
+sources/backend/batch/queries.py     # get_last_event(), salience-aware count_waiting_messages
+sources/backend/batch/worker.py      # new stages: salience, memory_salience
+sources/backend/batch/__init__.py    # export SaliencePipeline
+sources/backend/seeders.py           # salience back to waiting (real pipeline exists)
+sources/backend/message/models.py    # drop search_vector, add BM25 index to __table_args__
+sources/backend/event/models.py      # same
+sources/backend/topic/models.py      # same
+sources/backend/fact/models.py       # same
+sources/backend/admin/apis.py        # POST /admin/reembed
+sources/backend/main.py              # register search router
+tests/backend/batch/test_batch.py             # new fakes + tests for salience/extension/decisions
+tests/backend/batch/test_batch_integration.py # updated assertions (salience, extension)
+```
+
+---
+
+## 4. Implementation steps
+
+### 4.1 Embedding model switch + re-embed helper
+
+- `providers.yaml`: `defaults.embedding.model: "embeddinggemma-2:740m"` (dimensions stay 768).
+- `Provider.embed()` already validates dimensions — no change.
+- New endpoint `POST /admin/reembed` (admin router, alongside seed/trigger):
+
+```python
+# 1. Messages: null the vector, requeue the embedding stage
+UPDATE message SET embedding = NULL,
+                    processing_state = jsonb_set(processing_state, '{embedding}', '"waiting"');
+# 2. Memory objects: null the vector (embed_memory_objects picks up NULLs)
+UPDATE event SET embedding = NULL;  -- same for topic, fact
+```
+
+- The worker refills everything within one round per 32 rows (demo data: 1 round).
+- Timing note: with the 740M model a full 30-message batch embeds in ~1–2s (was ~40s), which also removes most of the Ollama contention we hit when running the app and integration tests concurrently.
+
+### 4.2 Event continuity (extend the last event)
+
+- New query in `BatchQueries.get_last_event(session, chat_id) -> EventDO | None` — newest by `end_at`, tie-break `id`.
+- `EventPipeline.run_round` becomes a two-step decide/generate flow:
+
+1. Build the eligible block exactly as today (anchor + contiguous waiting, embedded, outside the protected window, ≤ `BLOCK_SIZE`). Protected messages are structurally excluded — this is the "never go into an event" guarantee and gets its own regression test.
+2. Load the chat's last event (if any).
+3. **Decide (`d3:4b`, task `event_decision`)**: given the last event's summary/`end_at` and the new block, return either
+   `{"action": "extend"}` — the block continues the same conversational event — or
+   `{"action": "new", "groups": [{"message_ids": [...]}, ...]}` — boundaries inside the block.
+   No last event, or a `d3` failure → default to `{"action": "new"}` with a single whole-block group (today's fallback).
+4. **Generate (`gemma4:e4b`, task `event`)**:
+   - extend → new prompt `EVENT_SUMMARY` gets the old summary + new messages and returns the rewritten summary. Update the existing `EventDO`: `full_text`, `end_at = max(end_at, block end)`, link the new messages, **clear `embedding`** (same staleness semantics as topic/fact updates; the next round re-embeds). No new row.
+   - new → one `EVENT_SUMMARY` call per group (or a single call for the whole block as today), create events as today.
+5. Mark the block `event = done` as today.
+
+Invariants:
+
+- The last event is only ever edited when *eligible* messages continue it; the protected window stays untouchable, so the "current" conversation tail never gets summarized until it ages out.
+- Extension never touches messages that are already `event = done` (except by adding new links).
+- Editing the event bumps `updated_at` via `onupdate`; events have no `last_edited_at` column (topics/facts semantics stay as they are).
+
+### 4.3 BM25 indexes + drop `search_vector`
+
+Migration `0003_bm25_indexes`:
+
+- Drop `search_vector` from `message`, `event`, `topic`, `fact`; remove the columns from the 4 models (test DB follows via `create_all`).
+- Create one BM25 index per table over raw text, with key/filter fields:
+
+```python
+from paradedb import ParadeDBField
+
+Index(
+    "message_bm25_idx",
+    ParadeDBField(message.c.id),
+    ParadeDBField(message.c.full_text),
+    ParadeDBField(message.c.chat_id),      # keyed field: filter by chat
+    postgresql_using="paradedb",
+)
+# event/topic/fact: id + full_text + chat_id (event) / chatgroup_id (topic, fact)
+```
+
+- ParadeDB maintains the index automatically on insert/update — no triggers, no columns to keep in sync.
+- Why dropping is safe: no code has ever read or written `search_vector`; hybrid ranking takes `bm25_score` straight from `paradedb.score(full_text)` and `vector_score` from cosine distance; a Postgres-native tsvector path can be reintroduced later if `ts_rank`-based fusion is ever wanted.
+
+### 4.4 Salience with the decision model
+
+- `providers.yaml` override: `salience: {provider: local-ollama, model: "d3:4b"}`.
+- New `backend/batch/salience.py`:
+
+```python
+class SaliencePipeline:
+    """Score waiting messages 0.0–1.0 with the decision model."""
+
+    @classmethod
+    async def run_round(cls, provider, limit=10) -> int:
+        # oldest messages with processing_state.salience == waiting
+        # prompt: chatgroup's prompts["salience"] (fallback: default)
+        # response: {"salience": <float>} → clamp to [0, 1] → store, mark done
+```
+
+- New stage `score_memory_objects(limit=32)`: events/topics/facts with `salience_score IS NULL` get scored from their `full_text` (one batched call per model). The pipelines stop hardcoding `salience_score=0.5` and leave it NULL for this stage.
+- `ChatGroupConfig.use_salience = false` → the pipeline short-circuits: mark done, set 0.5 (old behavior preserved for groups that opt out).
+- Seeder: `_default_processing_state()` sets `salience: waiting`; the `salience_score=0.5` placeholder is removed (the pipeline writes the real score).
+- `count_waiting_messages()` adds the `salience` flag so queue depth reflects the new stage.
+- Worker round becomes:
+
+```
+1. embed_messages            (embedding)
+2. embed_memory_objects      (memory_embedding)
+3. SaliencePipeline.run_round (salience)
+4. score_memory_objects       (memory_salience)
+5. EventPipeline.run_round    (event)
+6. TopicPipeline.run_round    (topic)
+7. FactPipeline.run_round     (fact)
+```
+
+### 4.5 Decision model for create/update choices (topics & facts)
+
+Restructure `TopicPipeline`/`FactPipeline` into decide → generate, mapping onto the existing prompt pair:
+
+| Step | Model (task) | Output |
+|------|--------------|--------|
+| Candidate decision | `d3:4b` (`topic_candidate` / `fact_candidate`) | `[{"action": "create"|"update"|"skip", "topic_id": ...}]` — decisions only, no summaries |
+| Update/create generation | `gemma4:e4b` (`topic_update` / `fact_update`) | `{"summary": "..."}` — the new text, given the message + current summary |
+
+- `_extract_actions()` normalization stays as the tolerant parser for `d3`'s output shape (it already accepts bare objects, wrapped keys, bare arrays).
+- Empty/unparseable decision response → treat as skip, message still completes (`topic`/`fact` = done) — never fail a message on a decision no-op.
+- For creates: insert with `embedding = NULL` and `salience_score = NULL`; the batch stages fill both next round.
+- For updates: rewrite `full_text`, bump `last_edited_at`, clear `embedding` — unchanged semantics, now with the generation model writing the text.
+- `TOPIC_CANDIDATE`/`FACT_CANDIDATE` default prompts are rewritten to ask for decisions only; `TOPIC_UPDATE`/`FACT_UPDATE` defaults become real rewrite prompts (the current `ChatGroupPrompts` texts already describe exactly this split).
+
+### 4.6 Hybrid search endpoint (validation vehicle)
+
+`GET /chatgroups/{chatgroup_id}/search?q=...&k=20`
+
+1. Embed the query with the provider (768-dim).
+2. Per memory type (message, event, topic, fact), two candidate sets of at most 20 rows each:
+   - BM25 candidates: `WHERE parse(Model.full_text, q)` scoped by `chat_id`/`chatgroup_id`, with `paradedb.score(full_text)` as the raw BM25 score. (The draft's `all() & parse()` is a no-op conjunction, so the implementation uses bare `parse()`; the user's query tokens are phrase-quoted first because ParadeDB's query-string parser is Lucene syntax — a bare `a"b`, `field:value`, `boots*` or `NOT` raises a parser error, which surfaced as a 500.)
+   - Vector candidates: `ORDER BY cosine_distance(embedding, query_vec)` → `vector_score = 1 - distance`.
+3. **Normalize both channels to 0..1** before ranking: cosine similarity is already in range, ParadeDB BM25 is unbounded, so the query's best BM25 hit across all types is scaled to 1.0 (`search.scoring.normalize_bm25`, `clamp_unit`). Without this, BM25 magnitudes (~0–10+) drown the vector channel in every formula.
+4. Fuse per row with the chatgroup's `ranking_formula`: `eval` the stored lambda with `(vector_score, bm25_score, salience, linked_count)` in a namespace restricted to the math helpers of `search.scoring._SAFE_NAMESPACE` (no builtins). `use_salience = false` groups and NULL salience pass `1.0`. Note: formulas are *user*-authored and restricted-namespace `eval` is bypassable (`().__class__.__base__.__subclasses__()`), so a hostile formula means code execution — accepted for now (local single-user deployment), tracked as issue 001 in `plan/issue.md`.
+5. Return the top-k hits across all types (`id`, `type`, `text`, score components, `salience`, `linked_count`).
+
+This endpoint is what makes the other four changes observable: embedding A/B (qwen vs embeddinggemma-2 quality on the same queries), salience effect on ranking, and BM25 index correctness.
+
+### 4.7 Admin API additions
+
+```http
+POST /admin/reembed
+```
+
+Response: counts of nulled vectors (messages/events/topics/facts). Idempotent; safe to call after any model switch.
+
+---
+
+## 5. API contract
+
+### Search
+
+```http
+GET /chatgroups/{chatgroup_id}/search?q=trip%20to%20japan&k=20
+```
+
+Response:
+
+```json
+{
+  "hits": [
+    {
+      "type": "topic",
+      "id": "...",
+      "full_text": "Camille from Lyon is interested in hiking, photography, and planning a trip to Japan.",
+      "vector_score": 0.83,
+      "bm25_score": 6.42,
+      "salience": 0.9,
+      "linked_count": 3,
+      "score": 5.31
+    }
+  ]
+}
+```
+
+### Re-embed
+
+```http
+POST /admin/reembed
+```
+
+```json
+{"messages": 30, "events": 5, "topics": 1, "facts": 4}
+```
+
+---
+
+## 6. Verification
+
+```bash
+# 1. Switch the embedding model in providers.yaml, then re-embed everything
+curl -X POST http://localhost:8000/admin/reembed
+curl -X POST http://localhost:8000/admin/batch/trigger
+
+# 2. Salience: every message should get a real score
+psql $VISTUI_DATABASE_URL -c \
+  "SELECT processing_state->>'salience', count(*), avg(salience_score) FROM message GROUP BY 1;"
+
+# 3. Event continuity: post new messages to an existing chat, trigger rounds, then
+#    the LAST event should cover them (no new row while the conversation continues)
+psql $VISTUI_DATABASE_URL -c \
+  "SELECT full_text, start_at, end_at FROM event ORDER BY end_at DESC LIMIT 3;"
+
+# 4. Protected window still intact: the newest 10 messages never consolidate
+psql $VISTUI_DATABASE_URL -c \
+  "SELECT count(*) FROM message WHERE processing_state->>'event' = 'waiting';"  # >= 10 while chat is idle
+
+# 5. BM25 index sanity + hybrid search
+psql $VISTUI_DATABASE_URL -c "SELECT * FROM paradedb_indexes();"
+curl "http://localhost:8000/chatgroups/<id>/search?q=japan&k=10"
+
+# 6. Full suites
+just test               # unit: fakes cover salience, extension, decide/generate
+just test-integration    # real models: salience scores, extension, search smoke
+```
+
+Unit/integration test updates:
+
+- Fakes: `_fake_chat_model` learns the new prompts (decisions without summaries, salience scores, `event_decision` extend/new).
+- New unit tests: salience pipeline (score + clamp + use_salience=false short-circuit), event extension (extend rewrites the last row, new creates rows; decision failure falls back to new), protected-window regression for extension, decide/generate split (create leaves salience NULL, update clears embedding).
+- Integration test: assert real salience scores in [0, 1] on processed messages; assert the last event gets extended (not duplicated) when a continuing round runs; keep all existing queue-depth/window assertions.
+
+---
+
+## 7. Out of scope for Phase 4
+
+- Retrieval quality tuning beyond the formula plumbing (prompt-based reranking, MMR…).
+- Stale-event cleanup after message edits (edit → requeue → new/extended event, old event remains).
+- Keywords extraction and LLM-computed `memory_ratio` (planned in earlier phases, still unimplemented).
+- Retry logic for failed messages (still mark + count only).
+- Ranking-formula editor UI / per-chatgroup search presets.
+- Cross-ChatGroup consolidation and provider hot-reloading.
+
+---
+
+## 8. Changelog
+
+- 2026-11-15: Created Phase 4 plan: embeddinggemma-2 switch, event continuity with protected window, ParadeDB BM25 indexes (drop `search_vector`), d3 salience scoring, decision/generation model split.
+- 2026-11-15: Implemented 4.1 + 4.3 + 4.6 + 4.7 (embeddinggemma-2 switch and `POST /admin/reembed`, ParadeDB BM25 indexes replacing `search_vector`, hybrid search endpoint). 4.2, 4.4 and 4.5 are still pending. See §9.
+- 2026-11-15: Ranking follow-up on search: default formula as a pydantic default, no hardcoded formulas, logarithmic `link_weight`, 0..1 normalization of both score channels. See §9.
+- 2026-11-15: Code review of the whole uncommitted Phase 4 diff: BM25 query-token quoting (500 fix), NaN guard, reembed constant. See §9.
+- 2026-11-15: Ranking-formula RCE: interpreter fix implemented and verified, then reverted by decision back to plain `eval`; documented as issue 001 in `plan/issue.md`. See §9.
+
+---
+
+## 9. Results
+
+### Phase 1 — Embedding switch + re-embed (2026-11-15) — DONE
+
+**Changes:** `providers.yaml` and the env-fallback in `llm/config.py` now use `embeddinggemma-2:740m`. New `POST /admin/reembed` nulls all vectors (messages/events/topics/facts) and requeues `processing_state.embedding = waiting` via `jsonb_set`, so the worker recomputes everything; returns per-table counts (`ReembedResponse`).
+
+**Verification:** 61 unit tests pass (new `test_reembed_endpoint` covers null vectors + requeue). Full integration run against the real provider passed (seed → 2 worker rounds → all 30 messages embedded at 768-dim by embeddinggemma-2, events/topics/facts created). Total run ~291s vs ~304–409s previously — embedding stage went from ~39s (qwen, 30 texts) to ~1s; remaining time is dominated by the gemma4 chat calls.
+
+**Notes:** switching back is a one-line `providers.yaml` change plus `POST /admin/reembed`. No code path depends on the model name; dimension validation in `Provider.embed` still enforces 768.
+
+### Phase 2 — BM25 indexes + hybrid search endpoint (2026-11-15) — DONE
+
+**Changes:** migration `0003_bm25_indexes` drops `search_vector` from message/event/topic/fact and creates `message_bm25_idx`, `event_bm25_idx`, `topic_bm25_idx`, `fact_bm25_idx` (`USING bm25 (id, full_text, chat_id|chatgroup_id) WITH (key_field='id')`); the models declare the same indexes so `create_all` in tests mirrors them. New `sources/backend/search/` package: `GET /api/v1/chatgroups/{chatgroup_id}/search?q=&k=`, hybrid BM25 + cosine fusion per memory type with `_CANDIDATE_LIMIT = 20` per mode.
+
+**Verification:** `EXPLAIN ANALYZE` shows `Custom Scan (ParadeDB Base Scan)` on `message_bm25_idx` with `Exec Method: TopKScanExecState`, `TopK Order By: pdb.score() desc` and the `chat_id` filter pushed into the Tantivy query as a term — no post-index sort. Live calls against the real `embeddinggemma-2:740m` provider rank "My favourite hiking boots…" (bm25 5.65, vector 0.79) above "I went hiking in the mountains…" (bm25 3.49) above a semantically close but lexically absent "…balcony fence…" (bm25 0, vector 0.56). Nine search tests (`tests/backend/search/`) cover formula evaluation, the default formula, BM25 normalization, the link-weight curve, auth/404, `k` truncation and the full hybrid ranking; `alembic upgrade head` on the dev DB reaches `0003`.
+
+**Notes:** the draft's `paradedb.all(full_text) & paradedb.parse(...)` is a no-op conjunction, so the implementation uses bare `parse()`. Multi-word queries are OR'd by ParadeDB's parser ("hiking boots" matches hiking-only rows). No vector index (HNSW/ivfflat) is created: the vector channel scans the chatgroup's rows with `ORDER BY cosine_distance(...) LIMIT 20`, fine for per-chatgroup result sets but worth revisiting at scale.
+
+### Phase 3 — Ranking normalization and link weighting (2026-11-15) — DONE
+
+Follow-up review of the search results; four fixes.
+
+1. **`DEFAULT_RANKING_FORMULA` is a pydantic default on `ChatGroupBase`**, so `ChatGroupCreate` and `ChatGroupCreateInternal` inherit it and no caller has to pass a formula. The column deliberately keeps no DB server default.
+2. **No hardcoded formulas**: `seeders.py` used its own vector-only formula (silently disabling BM25 for demo chatgroups) and `tests/backend/chatgroup/factories.py` duplicated the default string; both now import `DEFAULT_RANKING_FORMULA`.
+3. **Logarithmic link weight**: multiplying by `linked_count` linearly scored every unconsolidated message at exactly 0 — invisible even on a perfect match. `search.scoring.link_weight` replaces it: 0 links → 0.5, 1 → 0.58, 10 → 0.76, 100 → 1.0 (`LINK_WEIGHT_REFERENCE`), logarithmic throughout and still slowly growing past the reference. Exposed to admin formulas as `link_weight(linked_count)`, next to `max`, `min`, `abs`, `log`, `log10`, `sqrt`.
+4. **Normalization**: BM25 is divided by the best BM25 hit of the query (`normalize_bm25`) and the vector channel is clamped, both before the formula runs, so the channels are comparable and `score` is reproducible from the reported components.
+
+Default formula: `lambda vector_score, bm25_score, salience, linked_count: max(vector_score, bm25_score) * salience * link_weight(linked_count)`
+
+**Verification:** 70 unit tests pass (`just test`), covering the inherited pydantic default, formula evaluation with helper functions, `normalize_bm25`, the link-weight curve, and the hybrid endpoint end to end (normalized channels, deterministic ranking: consolidated messages first, plain messages next, then the placeholder-salience event). Live check on the dev DB with real embeddings: an unconsolidated perfect BM25 match now scores 0.500 instead of 0.000, and `q="balcony fence"` still ranks the fence message first (bm25 1.0) with the hiking messages behind it on vector score alone. `ruff` and `mypy` clean.
+
+### Phase 4 — Code review of the uncommitted diff (2026-11-15) — FIXED
+
+Review of everything not yet committed (admin/reembed, BM25 migration, models, search package, seeding, chatgroup schemas). Four findings, all fixed:
+
+1. **Critical — arbitrary code execution via `ranking_formula`.** Any authenticated user can set a chatgroup's formula (`POST`/`PATCH /api/v1/chatgroups`), and search `eval`s it with `{"__builtins__": {}}` — which is bypassable without builtins: `().__class__.__base__.__subclasses__()` reaches every loaded class (verified: 228 reachable), and from there it is a hop to `subprocess`. An interpreter fix (AST whitelist + `literal_eval`-style node-by-node evaluation, no `eval`/`compile`, plus 422-on-write) was implemented and fully verified, then **reverted by decision** to keep the simple `eval` for this local single-user deployment. The vulnerability stays open and is documented with the full fix design in `plan/issue.md` (issue 001).
+2. **High — Lucene injection on the search endpoint.** The raw `q` reached ParadeDB's query-string parser: `a"b`, `field:value`, `boots AND (x OR y)`, `h~2`, `\`, `-`, a bare `NOT` and whitespace-only queries all raised `could not parse query string` → HTTP 500. Fix: `_quote_bm25_tokens` phrase-quotes every whitespace-separated token (inner quotes/backslashes escaped), the API adds `pattern=r"\S"` to reject blank queries, and the service early-returns on `q.strip() == ""`. Recall is unchanged: the BM25 analyzer normalizes quoted tokens the same way (`"hiking!"` still matches 9/9 hiking rows, multi-token queries still OR).
+3. **Medium — NaN propagation.** A zero/NaN embedding makes `cosine_distance` return NaN, which survived `clamp_unit` (Python `min`/`max` propagate NaN) and poisoned scores and sort order. Fix: `clamp_unit` maps non-finite values to 0.0.
+4. **Cosmetic — reembed hardcoded the `"waiting"` string** instead of `ProcessingStatus.WAITING`; now it uses the constant (`json.dumps`, since `jsonb_set` takes a JSONB literal).
+
+Verified non-issues: search ownership filtering (`ChatGroupService.retrieve` scopes by user), reembed→worker requeue contract (`embed_memory_objects` picks up NULL-embedding events/topics/facts), migration downgrade fidelity (0002 never created the dropped GIN indexes), `Table.append_constraint(Index)` is officially supported, `k`/`q` bounds, and the formula compilation cache (bounded by chatgroup count).
+
+**Verification:** 73 unit tests pass (`just test`) — coverage includes formula evaluation (default, math helpers, boolean/conditional semantics, non-lambda rejection), hostile BM25 queries returning 200 with non-NaN scores, blank queries 422, and a custom formula accepted on chatgroup create (201). Live dev-DB checks: hostile queries return vector-only hits instead of 500s; end-to-end search unchanged with the plain `eval`. `ruff` and `mypy` clean.

@@ -2,7 +2,7 @@ import itertools
 import uuid
 
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import ChatGroupRead
+from backend.chatgroup.schemas import DEFAULT_RANKING_FORMULA, ChatGroupRead
 from polyfactory import Use
 
 from tests.backend.config import BaseFactory
@@ -49,10 +49,7 @@ class ChatGroupFactory(BaseFactory[ChatGroupDO]):
         "fact_candidate": "Select existing facts to update or decide to create a new fact.",
         "fact_update": "Update a specific fact given the message and its recent history.",
     }
-    ranking_formula = (
-        "lambda vector_score, bm25_score, salience, linked_count: "
-        "max(vector_score * salience * linked_count, bm25_score * salience * linked_count)"
-    )
+    ranking_formula = DEFAULT_RANKING_FORMULA
 
     @classmethod
     def to_api_response_data(cls, orm_model: ChatGroupDO | list[ChatGroupDO]) -> dict | list[dict]:

@@ -168,3 +168,25 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
                 assert any(
                     event.embedding is not None and len(event.embedding) == EMBEDDING_DIMENSIONS for event in events
                 )
+
+        # 4. Hybrid search through the real API: real query embedding + ParadeDB BM25.
+        login = await client.post(
+            "/api/v1/auth/jwt/login",
+            data={"username": "test@example.com", "password": "devpassword123"},
+        )
+        assert login.status_code == 200
+        token = login.json()["access_token"]
+        response = await client.get(
+            f"/api/v1/chatgroups/{chat.chatgroup_id}/search",
+            params={"q": "hiking Japan photography"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        hits = response.json()["hits"]
+        assert len(hits) > 0
+        scores = [hit["score"] for hit in hits]
+        assert scores == sorted(scores, reverse=True)
+        # Real BM25 matched the demo conversation, and the real vector similarity
+        # retrieved the embedded memories; both channels are merged in the hits.
+        assert any(hit["type"] == "message" and hit["bm25_score"] > 0 for hit in hits)
+        assert any(hit["vector_score"] > 0 for hit in hits)

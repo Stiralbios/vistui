@@ -14,6 +14,7 @@ from backend.fact import apis as fact
 from backend.health import apis as health
 from backend.logconfig import configure_loggers
 from backend.message import apis as message
+from backend.search import apis as search
 from backend.seeders import create_default_user, seed_demo_chat
 from backend.settings import AppSettings
 from backend.topic import apis as topic
@@ -63,6 +64,7 @@ app.include_router(message.router)
 app.include_router(event.router)
 app.include_router(topic.router)
 app.include_router(fact.router)
+app.include_router(search.router)
 app.include_router(admin.router)
 
 app.add_middleware(

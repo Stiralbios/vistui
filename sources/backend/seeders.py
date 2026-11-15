@@ -3,7 +3,7 @@ import uuid
 
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import ChatGroupConfig, ChatGroupPrompts
+from backend.chatgroup.schemas import DEFAULT_RANKING_FORMULA, ChatGroupConfig, ChatGroupPrompts
 from backend.database import get_async_sessionmaker
 from backend.exceptions import UserAlreadyExistProblem
 from backend.message.constants import MessageRole, ProcessingStatus
@@ -116,9 +116,7 @@ async def seed_demo_chat() -> dict:
                 description="Chat group used for Phase 3 embedding and consolidation testing.",
                 config=ChatGroupConfig().model_dump(),
                 prompts=ChatGroupPrompts().model_dump(),
-                ranking_formula=(
-                    "lambda vector_score, bm25_score, salience, linked_count: vector_score * salience * linked_count"
-                ),
+                ranking_formula=DEFAULT_RANKING_FORMULA,
             )
             session.add(chatgroup)
             await session.flush()

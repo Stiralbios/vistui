@@ -4,9 +4,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Ranking default: both score channels are normalized to 0..1 by `backend.search.scoring`
+# before the formula runs, and `link_weight` gives an unconsolidated item 0.5 and a
+# 100-link item 1.0 (logarithmic in between). Formulas are user-authored and evaluated
+# with `eval`; the resulting exposure is tracked as issue 001 in `plan/issue.md`.
 DEFAULT_RANKING_FORMULA = (
     "lambda vector_score, bm25_score, salience, linked_count: "
-    "max(vector_score * salience * linked_count, bm25_score * salience * linked_count)"
+    "max(vector_score, bm25_score) * salience * link_weight(linked_count)"
 )
 
 
@@ -46,6 +50,9 @@ class ChatGroupPrompts(BaseModel):
 class ChatGroupBase(BaseModel):
     name: str = Field(max_length=255)
     description: str | None = Field(default=None, max_length=1024)
+    # Pydantic-level default shared by every create schema (ChatGroupCreate and its
+    # Internal variant); the column itself has no server default on purpose.
+    ranking_formula: str = DEFAULT_RANKING_FORMULA
 
 
 class ChatGroupRead(ChatGroupBase):
@@ -67,7 +74,6 @@ class ChatGroupInternal(ChatGroupRead):
 class ChatGroupCreate(ChatGroupBase):
     config: ChatGroupConfig = Field(default_factory=ChatGroupConfig)
     prompts: ChatGroupPrompts = Field(default_factory=ChatGroupPrompts)
-    ranking_formula: str = DEFAULT_RANKING_FORMULA
 
 
 class ChatGroupContext(BaseModel):
