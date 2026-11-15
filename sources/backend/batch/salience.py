@@ -140,8 +140,9 @@ class SaliencePipeline:
     """
 
     @classmethod
-    async def run_round(cls, provider: Provider | None = None, limit: int = 10) -> int:
-        """Score up to `limit` oldest messages with processing_state.salience == waiting.
+    async def run_round(cls, provider: Provider | None = None, limit: int = 5) -> int:
+        """Score up to `limit` oldest messages with processing_state.salience == waiting
+        (the worker passes its configured VISTUI_BATCH_SALIENCE_LIMIT).
         Returns the number of messages handled (scored or opted out)."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():

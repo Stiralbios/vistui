@@ -85,13 +85,14 @@ If an Event, Topic, or Fact has `embedding = null`, it is also eligible for this
 
 ### Prerequisite: salience pipeline
 
-**Scope:** batch (up to 10 messages per round).
+**Scope:** batch (up to `VISTUI_BATCH_SALIENCE_LIMIT` messages per round, 5 by default).
 
 Salience is scored by the **decision model** (an ollama System One model such as
 `d3:4b`, see [llm-provider.md](llm-provider.md)), not by a chat completion:
 
-1. Select the oldest messages with `salience = waiting` (up to 10 per round, oldest
-   first), grouped by chatgroup.
+1. Select the oldest messages with `salience = waiting` (up to
+   `VISTUI_BATCH_SALIENCE_LIMIT` per round, 5 by default, oldest first), grouped by
+   chatgroup.
 2. For each message, one `decide()` call (element per element, like the other batch
    stages): the state carries the chatgroup description plus the single message
    (role, text), and one `score` question named `salience` is asked against a fixed
@@ -105,9 +106,9 @@ marked done, `salience_score` stays NULL (nothing is fabricated), and the search
 formula passes the neutral salience (1.0) for them.
 
 Events, Topics, and Facts with `salience_score = null` are scored the same way by the
-**memory salience stage**: one `decide()` call per model (events, topics, facts) per
-chatgroup, with the object's `full_text` as the state entry (up to 32 objects per
-round). Objects of opted-out chatgroups keep their NULL score.
+**memory salience stage**: one `decide()` call per object, with the object's
+`full_text` as the state entry (up to `VISTUI_BATCH_MEMORY_SALIENCE_LIMIT` objects per
+round per model, 32 by default). Objects of opted-out chatgroups keep their NULL score.
 
 ### Event pipeline
 
@@ -164,10 +165,11 @@ The fact pipeline uses two LLM calls.
 
 #### Step A: identify candidate facts
 
-1. Select the oldest unprocessed message (`fact = waiting`) outside the protected window, with `embedding = done` and `salience = done`.
+1. Select the oldest unprocessed message (`fact = waiting`) with `embedding = done` and `salience = done`. Unlike events and topics, the fact pipeline ignores the protected window: a fact is a cheap, self-contained extraction, so even the most recent messages get theirs promptly.
 2. Search existing Facts in the ChatGroup.
 3. Send the message and the top matching facts to the `fact_candidate` LLM prompt.
 4. The LLM selects up to `max_facts_per_message` existing facts that might need updating, or decides that a new fact should be created.
+5. If the message is inside the protected window and the LLM wants to update an existing fact, the whole decision is deferred: nothing is applied, the message stays `fact = waiting`, and it is retried once it ages out of the window (a fact must never be rewritten from a message that may still be edited or deleted). Creates are never deferred.
 
 Outputs:
 
@@ -195,9 +197,13 @@ A fact is rewritten in place when the underlying truth changes (e.g., "Mom is si
 
 The worker operates in rounds:
 
-1. Run the batch stages once, each in its own transaction: `embed_messages` (up to 32
-   messages), `embed_memory_objects` (up to 32 objects), the salience round (up to 10
-   messages), and the memory salience stage (up to 32 objects).
+1. Run the batch stages once, each in its own transaction: `embed_messages` (up to
+   `VISTUI_BATCH_EMBEDDING_LIMIT` messages), `embed_memory_objects` (up to
+   `VISTUI_BATCH_MEMORY_EMBEDDING_LIMIT` objects), the salience round (up to
+   `VISTUI_BATCH_SALIENCE_LIMIT` messages), and the memory salience stage (up to
+   `VISTUI_BATCH_MEMORY_SALIENCE_LIMIT` objects). All these limits are configurable
+   through the `VISTUI_BATCH_*` environment variables (`backend/settings.py`); the
+   event block size likewise (`VISTUI_BATCH_EVENT_BLOCK_SIZE`, 10 by default).
 2. Then run the consolidation pipelines in order: `event`, `topic`, `fact`. Each step
    is a separate sub-task with its own transaction.
 3. Commit results and state changes after each sub-task.
@@ -273,6 +279,11 @@ Status response:
 
 ## Changelog
 
+- 2026-11-15: Batch stage round limits are configurable through the `VISTUI_BATCH_*`
+  settings and the salience default dropped to 5 per round (user decision; was 10).
+  Facts no longer respect the protected window (user decision): fact extraction runs
+  on any embedded, salience-done message, but an update of an existing fact is
+  deferred until the updating message ages out of the window.
 - 2026-07-11: Initial batch consolidation design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: added embedding/salience as prerequisite batch pipelines, sequential per-message event→topic→fact ordering, event LLM can return multiple events, `fact_candidate` can create new facts, `fact_update` only updates existing facts.
 

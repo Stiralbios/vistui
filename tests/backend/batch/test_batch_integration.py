@@ -25,6 +25,7 @@ from backend.llm.config import get_provider_config
 from backend.main import app
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
+from backend.settings import AppSettings
 from backend.topic.models import TopicDO
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -38,11 +39,18 @@ pytestmark = [
 ]
 
 # Each round runs one embedding batch, one salience decision call per scored message
-# (up to 10 per round) plus one real LLM call per pipeline (event, topic, fact), so a
-# round takes several minutes with the real providers: keep the default low and
-# override with VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
+# (up to VISTUI_BATCH_SALIENCE_LIMIT, 5 by default) plus one real LLM call per pipeline
+# (event, topic, fact), so a round takes several minutes with the real providers: keep
+# the default low and override with VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
 MAX_ROUNDS = int(os.environ.get("VISTUI_INTEGRATION_MAX_ROUNDS", "2"))
 EMBEDDING_DIMENSIONS = get_provider_config().defaults.embedding.dimensions
+# Per-round work limits of the batch stages, as the worker reads them from the
+# settings (overridable through the VISTUI_BATCH_* environment variables).
+SALIENCE_PER_ROUND = AppSettings().VISTUI_BATCH_SALIENCE_LIMIT
+EVENT_BLOCK_SIZE = AppSettings().VISTUI_BATCH_EVENT_BLOCK_SIZE
+# The event block only groups messages that are already salience-done, so the salience
+# limit caps the event block too.
+EVENT_PER_ROUND = min(SALIENCE_PER_ROUND, EVENT_BLOCK_SIZE)
 
 
 async def _queue_depth(client: AsyncClient) -> int:
@@ -85,9 +93,10 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             assert response.json() == {"status": "ok"}
             depths.append(await _queue_depth(client))
 
-        # The embedding, salience and event stages are batched (10 messages per round for
-        # salience and events), while the topic and fact stages each process one message
-        # per round: the queue drains by exactly one message per round.
+        # The embedding, salience and event stages are batched (SALIENCE_PER_ROUND salience
+        # decisions per round, event blocks capped by the salience-done gate), while the
+        # topic and fact stages each process one message per round: the queue drains by
+        # exactly one message per round.
         assert depths == [30 - i for i in range(1, MAX_ROUNDS + 1)]
 
         # The worker swallows pipeline errors into recent_failures: none should have fired.
@@ -116,28 +125,29 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
                 _assert_real_embedding(message)
                 assert message.processing_state["embedding"] == ProcessingStatus.DONE
 
-            # Salience stage: the decision model (d3:4b) scored the 10 oldest messages
-            # per round with a real salience in [0, 1]; like the embedding stage it
+            # Salience stage: the decision model (d3:4b) scored the SALIENCE_PER_ROUND oldest
+            # messages per round with a real salience in [0, 1]; like the embedding stage it
             # ignores the protected window, and the rest are still waiting.
-            for message in messages[: 10 * MAX_ROUNDS]:
+            for message in messages[: SALIENCE_PER_ROUND * MAX_ROUNDS]:
                 assert message.processing_state["salience"] == ProcessingStatus.DONE
                 assert message.salience_score is not None
                 assert 0.0 <= message.salience_score <= 1.0
-            for message in messages[10 * MAX_ROUNDS :]:
+            for message in messages[SALIENCE_PER_ROUND * MAX_ROUNDS :]:
                 assert message.processing_state["salience"] == ProcessingStatus.WAITING
                 assert message.salience_score is None
 
-            # Event stage: one block of 10 messages per round.
+            # Event stage: one block per round, capped by the salience-done gate.
             event_done = [m for m in messages if m.processing_state["event"] == ProcessingStatus.DONE]
-            assert len(event_done) == 10 * MAX_ROUNDS
+            assert len(event_done) == EVENT_PER_ROUND * MAX_ROUNDS
 
             # Topic and fact stages: the oldest message per round each.
             for message in messages[:MAX_ROUNDS]:
                 assert message.processing_state["topic"] == ProcessingStatus.DONE
                 assert message.processing_state["fact"] == ProcessingStatus.DONE
 
-            # Protected window: the 5 most recent messages keep their consolidation flags
-            # waiting (they become eligible only as the chat grows)...
+            # Protected window: the 5 most recent messages keep their event/topic flags
+            # waiting (they become eligible only as the chat grows); the fact stage ignores
+            # the window but processes one message per round and has not reached them yet.
             for message in messages[-PROTECTED_COUNT:]:
                 assert message.processing_state["event"] == ProcessingStatus.WAITING
                 assert message.processing_state["topic"] == ProcessingStatus.WAITING

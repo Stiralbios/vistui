@@ -267,13 +267,15 @@ async def test_search_endpoint_hybrid_ranking(client: AsyncClient):
     assert len(plain_messages) == 8
     assert all(hit["score"] == pytest.approx(link_weight(1)) for hit in plain_messages)
 
-    # The event spans all ten block messages (10 links) but the fake decision call scored
-    # it at 0.5 (mid rubric level), which halves its score below every plain message.
+    # Each event spans one block: with the salience gate the block is capped at
+    # VISTUI_BATCH_SALIENCE_LIMIT (5) messages per round, so the first event spans the 5
+    # oldest messages. The fake decision call scored it at 0.5 (mid rubric level), which
+    # halves its score below every plain message.
     event_hit = next(hit for hit in hits if hit["type"] == "event")
-    assert event_hit["linked_count"] == 10
+    assert event_hit["linked_count"] == 5
     assert event_hit["salience"] == pytest.approx(0.5)
     assert event_hit["bm25_score"] == 0.0
-    assert event_hit["score"] == pytest.approx(0.5 * link_weight(10))
+    assert event_hit["score"] == pytest.approx(0.5 * link_weight(5))
     assert event_hit["score"] < plain_messages[0]["score"]
 
 

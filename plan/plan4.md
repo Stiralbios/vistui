@@ -107,7 +107,7 @@ UPDATE event SET embedding = NULL;  -- same for topic, fact
    `{"action": "new", "groups": [{"message_ids": [...]}, ...]}` — boundaries inside the block.
    No last event, or a `d3` failure → default to `{"action": "new"}` with a single whole-block group (today's fallback).
 4. **Generate (`gemma4:e4b`, task `event`)**:
-   - extend → new prompt `EVENT_SUMMARY` gets the old summary + new messages and returns the rewritten summary. Update the existing `EventDO`: `full_text`, `end_at = max(end_at, block end)`, link the new messages, **clear `embedding`** (same staleness semantics as topic/fact updates; the next round re-embeds). No new row.
+   - extend → new prompt `EVENT_SUMMARY` gets the old summary + new messages and returns the rewritten summary. Update the existing `EventDO`: `full_text`, `end_at = max(end_at, block end)`, link the new messages, **clear `embedding` and `salience_score`** (same staleness semantics as topic/fact updates; the next rounds re-embed and re-score). No new row.
    - new → one `EVENT_SUMMARY` call per group (or a single call for the whole block as today), create events as today.
 5. Mark the block `event = done` as today.
 
@@ -148,7 +148,7 @@ was superseded by the System One discovery, see §8):
 - `providers.yaml` override: `salience: {provider: local-ollama, model: "d3:4b"}` — a
   *decision task* resolved by `Provider.decide(task="salience")` against the same
   overrides map as chat tasks, falling back to `defaults.decision`.
-- `backend/batch/salience.py`: `SaliencePipeline.run_round(limit=10)` takes the oldest
+- `backend/batch/salience.py`: `SaliencePipeline.run_round(limit=5)` takes the oldest
   waiting messages and scores them **element per element** (user decision, like the
   other batch stages): one `decide()` call per message with state
   `{chatgroup, message: {role, text}}`, a single `ScoreQuestion` named `salience`
@@ -159,7 +159,9 @@ was superseded by the System One discovery, see §8):
   120 → 300 (only decision calls use it). The first cut batched the group's messages
   into chunked calls of 5 questions against a shared state; element-per-element is
   simpler and faster (every question is scored against the whole state, so batched
-  calls grow superlinearly).
+  calls grow superlinearly). The per-round limit (5, down from the first cut's 10) and
+  all other batch stage limits are configurable through the `VISTUI_BATCH_*` settings
+  (`settings.py`, user decision); the worker passes them into the stages.
 - New stage `score_memory_objects(limit=32)`: events/topics/facts with
   `salience_score IS NULL` scored from `full_text` the same way — one `decide()` call
   per object (state key `event`/`topic`/`fact`). The pipelines
@@ -325,6 +327,14 @@ Unit/integration test updates:
 - 2026-11-15: Middle step before 4.4/4.5: switched providers.yaml to the gomodel proxy (embedding via the `ollama_yople` upstream, LLM to `strata_toaster/iq3_xxs`), and validated the `d3:4b` decision model: it is System One-only (`/v1/systemone`, no chat completions) and gomodel cannot proxy that endpoint to ollama yet, so decisions go direct to `local-ollama`. See §9.
 - 2026-11-15: Decision-model support in code: `defaults.decision` key in providers.yaml (local-ollama/d3:4b) and `Provider.decide()` — a System One client with typed `ChoiceQuestion`/`NoulQuestion`/`ScoreQuestion` models, `DecisionAnswer` parsing, keep_alive passthrough and 8 hermetic tests. See §9.
 - 2026-11-15: Removed the never-wired `keywords` task (ChatGroupPrompts field, providers.yaml override, docs): no pipeline called it, nothing stored it, and BM25 indexes raw text. `memory_ratio` kept for the future search token-budget split (issue 002).
+- 2026-11-15: Batch stage round limits are now configurable through the `VISTUI_BATCH_*`
+  settings and the salience default dropped from 10 to 5 per round (user decision).
+  Facts no longer respect the protected window (user decision): extraction runs on any
+  embedded, salience-done message, but updates of existing facts are deferred until the
+  updating message ages out of the window; `get_single_message_with_state` grew the
+  `outside_protected_window` flag. Documented that every event/topic/fact `full_text`
+  update must clear both `embedding` and `salience_score` for regeneration (§4.2 will
+  follow the same rule on event extension).
 - 2026-11-15: Salience scoring switched from batched `decide()` calls (chunked at 5
   questions per chatgroup) to element-per-element — one call per message / memory
   object (user decision; simpler and faster, ~9s per element with d3:4b).
@@ -356,11 +366,16 @@ Unit/integration test updates:
 `overrides:` map as chat tasks, `defaults.decision` as fallback; the `salience` override
 points at `local-ollama`/`d3:4b`). New `backend/batch/salience.py` with two worker stages
 inserted between the embedding stages and consolidation: `salience` (`SaliencePipeline`,
-10 oldest waiting messages per round, one `decide()` call per message — element per
-element, state = chatgroup description + the single message, a `ScoreQuestion` named
-`salience` against a 5-level rubric, normalized score
-`score / 4` clamped to [0,1]) and `memory_salience` (`score_memory_objects`, NULL-pickup
-for events/topics/facts, up to 32 per round, one call per object). Opt-out
+the `VISTUI_BATCH_SALIENCE_LIMIT` oldest waiting messages per round — 5 by default, was
+10 before the user revision — each scored element per element: one `decide()` call per
+message, state = chatgroup description + the single message, a `ScoreQuestion` named
+`salience` against a 5-level rubric, normalized score `score / 4` clamped to [0,1]) and `memory_salience` (`score_memory_objects`, NULL-pickup
+for events/topics/facts, up to 32 per round, one call per object). All batch stage round
+limits are configurable through the `VISTUI_BATCH_*` settings (embedding 32, memory
+embedding 32, salience 5, memory salience 32, event block size 10); the worker passes
+them to the stages. Facts now ignore the protected window (user decision): any
+embedded, salience-done message gets its fact extracted immediately, but an update of
+an existing fact is deferred until the updating message ages out of the window. Opt-out
 (`use_salience` false/null) marks the message stage done but leaves the score NULL — no
 decision call, neutral 1.0 at scoring time. The event/topic/fact queries now enforce the
 documented `salience = done` gate; topic/fact rewrites clear `salience_score` with the
@@ -368,9 +383,10 @@ embedding; the seeder queues salience like any other stage. `VISTUI_BATCH_INTERV
 disables the background scheduler (used by `just test-integration` to kill the
 admin-trigger-vs-scheduler race).
 
-**Verification:** 90 unit tests (9 new: decide task override, salience scoring,
+**Verification:** 93 unit tests (12 new: decide task override, salience scoring,
 limits, opt-out NULL, malformed-answer rollback, memory scoring, gate, queue count,
-seeded state, worker round). Live end-to-end on the dev DB against real d3:4b: batched
+seeded state, worker round, worker salience-limit setting, fact window exemption,
+protected update deferral). Live end-to-end on the dev DB against real d3:4b: batched
 first cut 10 messages in 2 chunked calls (246s) + 10 memory objects in 3 calls (160s);
 element-per-element 4 messages in 4 calls (37s, ~9s each) — hiking plans/preferences
 0.26–0.66, minor context ~0.2–0.4, stale placeholder texts 0.06–0.22. All hooks green
@@ -381,8 +397,9 @@ predates the System One discovery — d3:4b has no chat API. Latency is the cost
 probability-weighted rubric (~5-10s per scored element); element-per-element scoring was
 chosen over batched calls after measuring superlinear batch growth (every question is
 scored against the whole state) — a 10-message round costs ~90s instead of ~4 min, and
-the 300s decision-provider timeout also covers the cold model load. A 30-message chat
-drains in ~3 rounds (~5 min of d3 time). gomodel still cannot proxy `/v1/systemone`, so
+the 300s decision-provider timeout also covers the cold model load. A 30-message chat's
+salience drains in ~6 rounds of 5 (~4.5 min of d3 time in total — the lower limit only
+spreads the same work over more rounds). gomodel still cannot proxy `/v1/systemone`, so
 decision calls stay direct to `local-ollama` (HTTP 400 "provider type ollama has no
 System One API").
 

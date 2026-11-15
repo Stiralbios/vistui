@@ -1,6 +1,7 @@
 import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any
 
 from backend.batch.embeddings import embed_memory_objects, embed_messages
@@ -12,6 +13,7 @@ from backend.database import get_async_sessionmaker
 from backend.llm import Provider
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
+from backend.settings import AppSettings
 from loguru import logger
 
 
@@ -37,6 +39,7 @@ class BatchWorker:
         """Run each pipeline exactly once, each in its own transaction, and refresh the
         queue depth before and after so the admin status stays accurate."""
         provider = await self.get_provider()
+        settings = AppSettings()
 
         batch_status.running = True
         batch_status.current_pipeline = None
@@ -46,13 +49,21 @@ class BatchWorker:
             async with get_async_sessionmaker()() as session, session.begin():
                 batch_status.queue_depth = await BatchQueries.count_waiting_messages(session)
 
-            # (name used for status/logs and as processing_state key, async callable)
+            # (name used for status/logs and as processing_state key, async callable).
+            # The per-round work limits come from the VISTUI_BATCH_* settings; the
+            # consolidation pipelines event/topic/fact are single-message by design.
             pipelines: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
-                ("embedding", embed_messages),
-                ("memory_embedding", embed_memory_objects),
-                ("salience", SaliencePipeline.run_round),
-                ("memory_salience", score_memory_objects),
-                ("event", EventPipeline.run_round),
+                ("embedding", partial(embed_messages, limit=settings.VISTUI_BATCH_EMBEDDING_LIMIT)),
+                (
+                    "memory_embedding",
+                    partial(embed_memory_objects, limit=settings.VISTUI_BATCH_MEMORY_EMBEDDING_LIMIT),
+                ),
+                ("salience", partial(SaliencePipeline.run_round, limit=settings.VISTUI_BATCH_SALIENCE_LIMIT)),
+                (
+                    "memory_salience",
+                    partial(score_memory_objects, limit=settings.VISTUI_BATCH_MEMORY_SALIENCE_LIMIT),
+                ),
+                ("event", partial(EventPipeline.run_round, block_size=settings.VISTUI_BATCH_EVENT_BLOCK_SIZE)),
                 ("topic", TopicPipeline.run_round),
                 ("fact", FactPipeline.run_round),
             ]
@@ -86,11 +97,14 @@ class BatchWorker:
     async def _peek_message_id(state_key: str) -> uuid.UUID | None:
         """Return the id of the next message waiting for this stage (None for the batch
         stages — embeddings and both salience stages — which operate on batches rather
-        than a single message)."""
+        than a single message). The fact stage ignores the protected window like its
+        pipeline does."""
         if state_key in ("embedding", "memory_embedding", "salience", "memory_salience"):
             return None
         async with get_async_sessionmaker()() as session, session.begin():
-            message = await BatchQueries.get_single_message_with_state(session, state_key)
+            message = await BatchQueries.get_single_message_with_state(
+                session, state_key, outside_protected_window=state_key != "fact"
+            )
             return message.id if message else None
 
     @staticmethod

@@ -99,9 +99,12 @@ class BatchQueries:
     async def get_single_message_with_state(
         session: AsyncSession,
         state_key: str,
+        outside_protected_window: bool = True,
     ) -> MessageDO | None:
-        """Return the oldest single message waiting for the given pipeline, skipping
-        messages inside their chat's protected window.
+        """Return the oldest single message waiting for the given pipeline. The
+        protected window is honored by default; the fact pipeline opts out with
+        `outside_protected_window=False` (facts are extracted even from protected
+        messages — only updates of an existing fact are deferred, see FactPipeline).
 
         Consolidation eligibility also requires `salience = done`: the salience stage
         runs earlier in the same worker round, so a message is scored before it is
@@ -111,12 +114,26 @@ class BatchQueries:
             select(MessageDO)
             .where(MessageDO.processing_state[state_key].astext == ProcessingStatus.WAITING)
             .where(MessageDO.processing_state["salience"].astext == ProcessingStatus.DONE)
-            .where(_is_outside_protected_window())
             .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
             .limit(1)
         )
+        if outside_protected_window:
+            stmt = stmt.where(_is_outside_protected_window())
         res = await session.execute(stmt)
         return res.scalars().first()
+
+    @staticmethod
+    async def is_message_protected(session: AsyncSession, message: MessageDO) -> bool:
+        """True when the message sits inside its chat's protected window (fewer than the
+        chatgroup's `protected_message_count` newer messages exist in the same chat)."""
+        stmt = (
+            select(func.count())
+            .select_from(MessageDO)
+            .where(MessageDO.id == message.id)
+            .where(~_is_outside_protected_window())
+        )
+        count = (await session.execute(stmt)).scalar_one()
+        return count > 0
 
     @staticmethod
     async def get_contiguous_waiting_messages(

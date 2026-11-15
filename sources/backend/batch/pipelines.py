@@ -53,12 +53,14 @@ class EventPipeline:
     BLOCK_SIZE = 10
 
     @classmethod
-    async def run_round(cls, provider: Provider | None = None) -> int:
+    async def run_round(cls, provider: Provider | None = None, block_size: int | None = None) -> int:
         """Process one block: take the oldest message waiting for the "event" stage
         outside its chat's protected window and, in a single LLM call, group it with up to
-        BLOCK_SIZE contiguous embedded, non-protected messages of the same chat into events.
-        Returns the number of messages processed, 0 if nothing to do."""
+        `block_size` (default BLOCK_SIZE) contiguous embedded, non-protected messages of
+        the same chat into events. Returns the number of messages processed, 0 if
+        nothing to do."""
         provider = provider or Provider()
+        block_size = block_size if block_size is not None else cls.BLOCK_SIZE
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "event")
             if message is None or message.embedding is None:
@@ -69,7 +71,7 @@ class EventPipeline:
                 message.chat_id,
                 "event",
                 message.created_at,
-                cls.BLOCK_SIZE,
+                block_size,
             )
             if not block:
                 return 0
@@ -241,17 +243,25 @@ class FactPipeline:
 
     For each message, the nearest existing facts (by embedding similarity) are offered
     to the LLM, which decides to create new facts or update/link existing ones.
+
+    Unlike events and topics, facts ignore the protected window: a fact is a cheap,
+    self-contained extraction, so even the most recent messages get theirs promptly.
+    The one protection kept is that an existing fact is never *rewritten* from a message
+    still inside the window (it may yet be edited or deleted): such an update is
+    deferred — the message stays waiting and is retried once it ages out.
     """
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None) -> int:
-        """Process the oldest message waiting for the "fact" stage outside its chat's
-        protected window: ask the LLM for create/update actions against the nearest facts,
-        then apply them. Returns 1 if a message was processed, else 0 (nothing waiting,
-        not yet embedded, or protected)."""
+        """Process the oldest message waiting for the "fact" stage (protected window
+        ignored): ask the LLM for create/update actions against the nearest facts,
+        then apply them. If the message is protected and the LLM wants to update an
+        existing fact, nothing is applied and the message stays waiting (retried when
+        it leaves the window). Returns 1 if a message was processed, else 0 (nothing
+        waiting or not yet embedded)."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
-            message = await BatchQueries.get_single_message_with_state(session, "fact")
+            message = await BatchQueries.get_single_message_with_state(session, "fact", outside_protected_window=False)
             if message is None or message.embedding is None:
                 return 0
 
@@ -277,6 +287,13 @@ class FactPipeline:
             )
 
             actions = _extract_actions(response, "facts")
+            protected = await BatchQueries.is_message_protected(session, message)
+            if protected and any(action.get("action") == "update" for action in actions):
+                # Never rewrite an existing fact from a message that may still change:
+                # leave the message (and any create actions of this decision) untouched,
+                # so the whole decision is re-run once the message ages out.
+                logger.info("Fact pipeline deferred an update: message is inside the protected window")
+                return 0
             for action in actions:
                 await cls._apply_action(session, chatgroup_id, message, action, existing_facts)
 
