@@ -89,7 +89,9 @@ requests.post(f"{base}/chatgroups", headers={"Authorization": f"Bearer {tok}"},
 requests.get(f"{base}/chatgroups", ...)  # any search on the group evaluates the payload
 ```
 
-
+=> idea:
+In a settings.yaml we put all the formula we want and we just reference them in the db. Safer and less complex
+than the llm proposed solution
 
 ## Issue 002 — Search don't have token limit
 
@@ -124,3 +126,22 @@ status, so this is a recorded future simplification — not implemented for now
 ## Issue 004 — message send for salience should be configurable
 
 To tweak how it answers
+
+
+## Issue 005 — no last_edited_at on message
+
+If update is on edition such as salience or embeding or the state machine
+We also want to track when the message was actually sent or resent
+
+Change last_edited_at to edited_at ?In all objects
+
+
+## Issue 006 — no consolidation for fact / topic
+
+todo in the far futur
+Custom batch job to look for consolidation with search and similarity between topics/facts.
+Right now the base just grow and grow. Hopefully the system is able to catch stuff that should be in the 
+same topic/fact but all of this happen on message ingestion. There is nothing to consolidate if there is
+too many similar ones
+
+
