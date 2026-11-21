@@ -36,3 +36,6 @@ LLM providers (configured in `providers.yaml`) · uv, devbox, just.
 - API base URL: `/api/v1` · health check: `GET /health`
 - TDD: write failing tests first; run relevant tests after every change
 - Line length 120, double quotes, `ruff check` clean, mypy strict-ish
+- Keep comments short. 
+- Do not reference plan, issues in the comments. You can reference documentations
+- Do not reference the previous state in comments. Only what they do right here and now
