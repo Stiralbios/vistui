@@ -202,7 +202,7 @@ conversational text.
 | Which provider/model/temperature to use | `settings.yaml`. |
 | How to format the request | Provider adapter. |
 | What text to send and how to interpret the response | Prompt template and task code. |
-| Where prompts are stored | ChatGroup `prompts` JSONB. |
+| Where prompts are stored | ChatGroup `prompts` JSONB; default texts in `sources/backend/llm/prompts.py`. |
 
 ## Error handling
 
@@ -218,6 +218,10 @@ conversational text.
 
 ## Changelog
 
+- 2026-11-22: All default prompt texts — decision-model (salience, memory ratio,
+  event boundary) and chat-model (event summary, topic/fact) — live in
+  `sources/backend/llm/prompts.py`; ChatGroupPrompts references the constants as its
+  field defaults.
 - 2026-11-22 (issue 007): The event task split into `event_boundary` (decision model:
   per-message extend/new/mixed choice against the chat's last event) and
   `event_summary` (chat model: rebuild an event's summary from its full member list).

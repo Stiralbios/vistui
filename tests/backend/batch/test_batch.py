@@ -13,16 +13,12 @@ from backend.batch.queries import BatchQueries
 from backend.batch.salience import SaliencePipeline, score_memory_objects
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import (
-    DEFAULT_EVENT_BOUNDARY_CRITERIA,
-    DEFAULT_SALIENCE_RUBRIC,
-    ChatGroupConfig,
-    ChatGroupPrompts,
-)
+from backend.chatgroup.schemas import ChatGroupConfig, ChatGroupPrompts
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO, EventMessageLinkDO
 from backend.fact.models import FactDO, FactMessageLinkDO
 from backend.llm import Provider
+from backend.llm.prompts import DEFAULT_EVENT_BOUNDARY_CRITERIA, DEFAULT_SALIENCE_RUBRIC
 from backend.llm.provider import ChoiceQuestion, DecisionAnswer
 from backend.message.constants import MessageRole, ProcessingStatus
 from backend.message.models import MessageDO

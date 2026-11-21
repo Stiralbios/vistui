@@ -1,7 +1,8 @@
 import uuid
 
 from backend.auth.schemas import Token
-from backend.chatgroup.schemas import DEFAULT_EVENT_BOUNDARY_CRITERIA, ChatGroupPrompts
+from backend.chatgroup.schemas import ChatGroupPrompts
+from backend.llm.prompts import DEFAULT_EVENT_BOUNDARY_CRITERIA
 from httpx import AsyncClient
 
 

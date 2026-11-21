@@ -25,14 +25,11 @@ from typing import Protocol, TypeVar
 from backend.batch.queries import BatchQueries
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import (
-    DEFAULT_SALIENCE_RUBRIC,
-    ChatGroupConfig,
-    ChatGroupPrompts,
-)
+from backend.chatgroup.schemas import ChatGroupConfig, ChatGroupPrompts
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO
 from backend.fact.models import FactDO
+from backend.llm.prompts import DEFAULT_SALIENCE_RUBRIC
 from backend.llm.provider import DecisionAnswer, Provider, ScoreQuestion
 from backend.search.scoring import clamp_unit
 from backend.topic.models import TopicDO

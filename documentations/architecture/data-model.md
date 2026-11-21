@@ -129,7 +129,7 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `max_facts_per_message` | Maximum number of facts a single message can create or update (default 5). |
 | `max_topics_per_message` | Maximum number of topics a single message can create or update (default 5). |
 
-**ChatGroup prompts schema (stored in `prompts`):**
+**ChatGroup prompts schema (stored in `prompts`; default texts in `sources/backend/llm/prompts.py`):**
 
 | Prompt key | Purpose |
 |------------|---------|
@@ -308,6 +308,11 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
 
 ## Changelog
 
+- 2026-11-22: All default prompt texts live in `sources/backend/llm/prompts.py`
+  (decision-model and chat-model prompts together); ChatGroupPrompts references the
+  constants as its field defaults. The `topic_candidate` and `fact_candidate` defaults
+  are the full pipeline prompts (placeholder sentences before), so chatgroups created
+  from now on store the real texts for those keys.
 - 2026-11-22 (issue 007): Events are built by a per-message boundary decision
   (extend / new / mixed) against the chat's last event: spans are unbounded, summaries
   are always rebuilt from the full member list, and a rewritten event is invalidated
