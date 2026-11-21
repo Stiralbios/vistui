@@ -1,8 +1,8 @@
 """Score normalization and evaluation of chatgroup ranking formulas.
 
-A chatgroup's `ranking_formula` is a lambda expression string (see
-`backend.chatgroup.schemas.DEFAULT_RANKING_FORMULA`) that combines a candidate's
-vector similarity, BM25 relevance, salience and linked count into a final score.
+A chatgroup's `ranking_formula` names an entry of the operator's settings file (see
+`backend.search.formulas`): a lambda expression that combines a candidate's vector
+similarity, BM25 relevance, salience and linked count into a final score.
 
 Both retrieval channels are normalized to 0..1 before a formula ever sees them: cosine
 similarity is already in that range, while ParadeDB BM25 relevance is unbounded and grows
@@ -10,10 +10,10 @@ with term frequency and corpus statistics. Without normalization the BM25 channe
 would drown the vector channel (0..1) in every formula.
 
 Formulas are evaluated with plain `eval` in a namespace restricted to a few math helpers.
-This is deliberately NOT a security boundary: any chatgroup owner can store a formula, and
-restricted namespaces are bypassable without builtins (`().__class__.__base__.__subclasses__()`),
-so a hostile formula means arbitrary code execution on the backend. Accepted for now because
-the deployment is local and single-user.
+The restriction is for readability, not sandboxing (restricted namespaces are bypassable
+without builtins); it is not a security boundary and does not need to be. Formulas are
+operator-authored settings entries, and chatgroups reference them by name only, so no
+user-authored string ever reaches this module.
 """
 
 import math

@@ -163,11 +163,11 @@ Request:
     "fact_candidate": "...",
     "fact_update": "..."
   },
-  "ranking_formula": "lambda vector_score, bm25_score, salience, linked_count: max(vector_score * salience * linked_count, bm25_score * salience * linked_count)"
+  "ranking_formula": "default"
 }
 ```
 
-Omitted `config`, `prompts`, and `ranking_formula` are filled from system defaults.
+Omitted `config`, `prompts`, and `ranking_formula` are filled from system defaults. `ranking_formula` must be a formula name defined in the settings file's `ranking_formulas` section (unknown names are rejected with `422`; formulas themselves are operator-authored settings entries, never accepted through the API).
 
 Response: `201 Created`
 
@@ -498,7 +498,7 @@ Token estimates use a simple tokenizer heuristic; exactness is not critical beca
 2. `full_text` must be non-empty and within a reasonable max length (TBD, suggested 32,000 characters).
 3. `prev_message_id` and `next_message_id` must refer to messages in the same Chat and must not create cycles or branching.
 4. `chatgroup_id` on a Chat cannot be changed after creation.
-5. `ranking_formula` must be valid Python lambda syntax accepted by `asteval`.
+5. `ranking_formula` must be a formula name defined in the settings file's `ranking_formulas` section (`422` otherwise); a ChatGroup whose stored name is not defined makes its search answer `422` as well.
 
 ## Open questions
 
@@ -526,3 +526,10 @@ Token estimates use a simple tokenizer heuristic; exactness is not critical beca
   stored one requeues the derived artifacts.
 - 2026-07-11: Initial API contract derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: frontend terminology, removed memory_ratio from ChatGroup config, removed dedicated memory retrieval endpoint, split fact prompts into `fact_candidate` and `fact_update`, added embedding/salience processing state.
+
+- 2026-11-21: `ranking_formula` stores the *name* of a formula defined in the
+  settings file's `ranking_formulas` section instead of lambda source (the create /
+  patch examples and the validation rule above are updated). The API accepts names
+  only — unknown names are `422` on write, and a ChatGroup whose stored name is not
+  defined makes its search answer `422`. This closes the arbitrary-code-execution
+  issue of chatgroup-authored formulas.

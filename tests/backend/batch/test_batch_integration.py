@@ -8,7 +8,7 @@ API and the consolidation results are checked in the database.
 These tests are slow (each round runs a real embedding batch, per-element salience
 decision calls against the decision model, and one real LLM call per consolidation
 pipeline — several minutes per round with the local models) and need a reachable
-provider as configured in providers.yaml. They are opt-in: run them with
+provider as configured in settings.yaml. They are opt-in: run them with
 `just test-integration` (sets VISTUI_INTEGRATION_TESTS=1).
 """
 
@@ -43,7 +43,7 @@ pytestmark = [
 # (event, topic, fact), so a round takes several minutes with the real providers: keep
 # the default low and override with VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
 MAX_ROUNDS = int(os.environ.get("VISTUI_INTEGRATION_MAX_ROUNDS", "2"))
-EMBEDDING_DIMENSIONS = get_provider_config().defaults.embedding.dimensions
+EMBEDDING_DIMENSIONS = get_provider_config().defaults_models.embedding.dimensions
 # Per-round work limits of the batch stages, as the worker reads them from the
 # settings (overridable through the VISTUI_BATCH_* environment variables).
 SALIENCE_PER_ROUND = AppSettings().VISTUI_BATCH_SALIENCE_LIMIT

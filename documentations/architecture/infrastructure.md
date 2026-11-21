@@ -60,7 +60,7 @@ Vistui runs as a single Python process. APScheduler is embedded in the same proc
 
 - The FastAPI app listens on a configurable host/port (default `0.0.0.0:8000`).
 - Postgres is accessed via a standard `postgresql://` connection string from environment variable `VISTUI_DATABASE_URL`.
-- LLM and embedding providers are accessed over HTTP/HTTPS using URLs defined in `providers.yaml`.
+- LLM and embedding providers are accessed over HTTP/HTTPS using URLs defined in `settings.yaml`.
 - No ingress, load balancer, or service mesh is required for single-instance deployment.
 
 ## Identity & security
@@ -144,11 +144,11 @@ services:
     build: .
     environment:
       VISTUI_DATABASE_URL: postgresql://vistui:${VISTUI_DB_PASSWORD}@db:5432/vistui
-      VISTUI_PROVIDERS_FILE: /config/providers.yaml
+      VISTUI_SETTINGS_FILE: /config/settings.yaml
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       REMOTE_API_KEY: ${REMOTE_API_KEY}
     volumes:
-      - ./providers.yaml:/config/providers.yaml:ro
+      - ./settings.yaml:/config/settings.yaml:ro
     ports:
       - "8000:8000"
     depends_on:
@@ -187,7 +187,7 @@ volumes:
 1. **Local development:** Docker Compose with ParadeDB image and seed data.
 2. **CI pipeline:** pytest + mutmut in GitHub Actions or similar.
 3. **Packaging:** Docker image published to a registry.
-4. **Documentation:** self-hosting guide with `providers.yaml` template and environment variable reference.
+4. **Documentation:** self-hosting guide with `settings.yaml` template and environment variable reference.
 
 ## Open questions
 

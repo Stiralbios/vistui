@@ -2,9 +2,27 @@
 
 ## Issue 001 — Arbitrary code execution via chatgroup `ranking_formula` (critical)
 
-- **Status:** OPEN — accepted for now (local, single-user deployment; do not expose chatgroup creation to untrusted users before fixing)
+- **Status (2026-11-22): DONE** — fixed by named formulas in the settings file (see
+  `plan/plan6.md` Results). As built:
+  - `providers.yaml` became `settings.yaml` (env var `VISTUI_SETTINGS_FILE`; model
+    sections renamed `defaults_models` / `overrides_models`) and gained the
+    `ranking_formulas` section: named lambda entries, validated at load (lambda over
+    exactly the four canonical parameters) and at app startup.
+  - The default formula also lives in code (`backend.search.formulas.DEFAULT_RANKING_FORMULA`);
+    settings entries merge over it — no formula setup at all still yields a working `default`.
+  - ChatGroups store the formula *name* (`ranking_formula` column, semantics changed by
+    migration `0007`, which rewrites the built-in default source into `"default"` and aborts
+    on custom formulas). The API accepts names only: `POST`/`PATCH /chatgroups` validate
+    against the registry (`422` unknown), so the reproduction payload below is now rejected
+    on write, and a stolen DB can at worst reference an undefined name.
+  - `eval` stays, for settings-authored text only (operator input is trusted at the level
+    of the code itself); an undefined stored name fails the search with `422`
+    (`RankingFormulaInvalidProblem`) instead of silently scoring with another formula.
+  - Residual, accepted by design: `evaluate_ranking_formula` must never be fed non-settings
+    strings again — the write path enforces it, and the loader validates what it loads.
 - **Reported / implemented-then-reverted:** 2026-11-15
-- **Decision:** keep the simple `eval` implementation for now; revisit before any multi-user or public deployment
+- **Decision (superseded 2026-11-22):** the reverted AST interpreter is not needed: the fix
+  moves formula authorship across the trust boundary instead of sandboxing the eval
 - **Where:** `sources/backend/search/scoring.py` (`evaluate_ranking_formula`), reachable through `GET /api/v1/chatgroups/{id}/search`
 - **Entry point for the payload:** `ranking_formula` on `POST`/`PATCH /api/v1/chatgroups` — writable by any authenticated chatgroup owner
 
@@ -89,7 +107,7 @@ requests.post(f"{base}/chatgroups", headers={"Authorization": f"Bearer {tok}"},
 requests.get(f"{base}/chatgroups", ...)  # any search on the group evaluates the payload
 ```
 
-=> idea:
+=> idea (implemented 2026-11-22, see the as-built note above):
 In a settings.yaml we put all the formula we want and we just reference them in the db. Safer and less complex
 than the llm proposed solution
 

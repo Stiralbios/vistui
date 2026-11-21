@@ -15,6 +15,7 @@ from backend.health import apis as health
 from backend.logconfig import configure_loggers
 from backend.message import apis as message
 from backend.search import apis as search
+from backend.search.formulas import get_ranking_formulas
 from backend.seeders import create_default_user, seed_demo_chat
 from backend.settings import AppSettings
 from backend.topic import apis as topic
@@ -40,6 +41,9 @@ def custom_exception_handler(loop, context):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load and validate the settings file's ranking formulas at startup: a broken
+    # entry fails the boot instead of the first search.
+    get_ranking_formulas()
     await create_db_and_tables()
     await create_default_user()
     if AppSettings().APP_ENVIRONMENT != "TEST":

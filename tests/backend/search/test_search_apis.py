@@ -6,11 +6,11 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import backend.search.formulas as formula_module
 import pytest
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
 from backend.chatgroup.schemas import (
-    DEFAULT_RANKING_FORMULA,
     ChatGroupConfig,
     ChatGroupContext,
     ChatGroupCreate,
@@ -22,6 +22,7 @@ from backend.llm import Provider
 from backend.llm.provider import DecisionAnswer, DecisionError
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
+from backend.search.formulas import DEFAULT_RANKING_FORMULA, DEFAULT_RANKING_FORMULA_NAME
 from backend.search.scoring import LINK_WEIGHT_REFERENCE, evaluate_ranking_formula, link_weight, normalize_bm25
 from backend.user.models import UserDO
 from httpx import AsyncClient
@@ -129,7 +130,11 @@ async def login(client: AsyncClient, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-async def _seed_search_data(use_llm_memory_ratio: bool = False, prompts: dict[str, Any] | None = None) -> dict:
+async def _seed_search_data(
+    use_llm_memory_ratio: bool = False,
+    prompts: dict[str, Any] | None = None,
+    ranking_formula: str = DEFAULT_RANKING_FORMULA_NAME,
+) -> dict:
     """Create a chatgroup with ten messages: three about hiking, seven about other
     topics. `prompts` updates individual prompts keys on top of the schema defaults."""
     chat_prompts = ChatGroupPrompts().model_dump()
@@ -142,7 +147,7 @@ async def _seed_search_data(use_llm_memory_ratio: bool = False, prompts: dict[st
             name="Search Group",
             config=ChatGroupConfig(protected_message_count=0, use_llm_memory_ratio=use_llm_memory_ratio).model_dump(),
             prompts=chat_prompts,
-            ranking_formula=DEFAULT_RANKING_FORMULA,
+            ranking_formula=ranking_formula,
         )
         session.add(chatgroup)
         await session.flush()
@@ -178,15 +183,24 @@ async def _seed_search_data(use_llm_memory_ratio: bool = False, prompts: dict[st
     return {"chatgroup_id": chatgroup.id}
 
 
+@contextlib.contextmanager
+def _registered_formulas(**entries: str):
+    """Temporarily extend the formula registry with named entries."""
+    registry = dict(formula_module.get_ranking_formulas())
+    registry.update(entries)
+    with patch.object(formula_module, "_formulas", registry):
+        yield
+
+
 def test_default_ranking_formula_is_a_pydantic_default():
-    """Every create schema inherits the shared formula: no caller has to pass one."""
-    assert ChatGroupCreate(name="Group").ranking_formula == DEFAULT_RANKING_FORMULA
+    """Every create schema inherits the shared formula name: no caller has to pass one."""
+    assert ChatGroupCreate(name="Group").ranking_formula == DEFAULT_RANKING_FORMULA_NAME
     internal = ChatGroupCreateInternal(
         name="Group",
         user_id=uuid.uuid4(),
         context=ChatGroupContext(user_id=uuid.uuid4()),
     )
-    assert internal.ranking_formula == DEFAULT_RANKING_FORMULA
+    assert internal.ranking_formula == DEFAULT_RANKING_FORMULA_NAME
 
 
 def test_evaluate_ranking_formula():
@@ -372,23 +386,78 @@ async def test_search_endpoint_survives_query_syntax(client: AsyncClient):
         assert response.status_code == 422, q
 
 
-async def test_create_chatgroup_accepts_custom_ranking_formula(client: AsyncClient):
-    """A chatgroup owner can store their own formula; it is only evaluated by search.
-
-    NOTE: formulas are evaluated with `eval` and a hostile formula is not rejected on
-    write. Do not open chatgroups to untrusted users.
-    """
+async def test_create_chatgroup_accepts_named_ranking_formula(client: AsyncClient):
+    """A chatgroup stores the *name* of a formula registered in the settings file."""
+    vector_only = "lambda vector_score, bm25_score, salience, linked_count: vector_score"
     token = await login(client, "test@example.com", "devpassword123")
-    response = await client.post(
-        "/api/v1/chatgroups",
-        headers={"Authorization": f"Bearer {token}"},
-        json={
+    with _registered_formulas(vector_only=vector_only):
+        response = await client.post(
+            "/api/v1/chatgroups",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "Group", "ranking_formula": "vector_only"},
+        )
+    assert response.status_code == 201
+    assert response.json()["ranking_formula"] == "vector_only"
+
+
+async def test_create_chatgroup_rejects_unknown_ranking_formula(client: AsyncClient):
+    """The API accepts formula names only, never formula source: an undefined name and
+    the classic restricted-namespace sandbox escape are both rejected on write."""
+    token = await login(client, "test@example.com", "devpassword123")
+    payloads = (
+        {"name": "Group", "ranking_formula": "gone"},
+        {
             "name": "Group",
-            "ranking_formula": "lambda vector_score, bm25_score, salience, linked_count: vector_score",
+            "ranking_formula": (
+                "lambda vector_score, bm25_score, salience, linked_count: ().__class__.__base__.__subclasses__()"
+            ),
         },
     )
-    assert response.status_code == 201
-    assert response.json()["ranking_formula"].startswith("lambda vector_score")
+    for payload in payloads:
+        response = await client.post(
+            "/api/v1/chatgroups",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        assert response.status_code == 422
+
+
+async def test_search_scores_with_the_named_formula(client: AsyncClient):
+    """Search resolves the chatgroup's formula name against the registry before
+    scoring: a registered `vector_only` formula is what the evaluator receives."""
+    ids = await _seed_search_data(ranking_formula="vector_only")
+    vector_only = "lambda vector_score, bm25_score, salience, linked_count: vector_score"
+    recorded: dict[str, str] = {}
+
+    def _recording_eval(formula: str, *args: Any) -> float:
+        recorded["formula"] = formula
+        return evaluate_ranking_formula(formula, *args)
+
+    with _registered_formulas(vector_only=vector_only), _fake_provider():
+        assert (await client.post("/admin/batch/trigger")).status_code == 200
+        assert (await client.post("/admin/batch/trigger")).status_code == 200
+
+        token = await login(client, "test@example.com", "devpassword123")
+        with patch("backend.search.service.evaluate_ranking_formula", side_effect=_recording_eval):
+            data = await _search(client, token, ids["chatgroup_id"], q="hiking")
+
+    assert recorded["formula"] == vector_only
+    assert len(data["hits"]) > 0
+
+
+async def test_search_rejects_unknown_formula_name(client: AsyncClient):
+    """A chatgroup whose stored formula name is not defined fails the search with a
+    422 problem instead of silently scoring with another formula."""
+    ids = await _seed_search_data(ranking_formula="gone")
+    with _fake_provider():
+        token = await login(client, "test@example.com", "devpassword123")
+        response = await client.get(
+            f"/api/v1/chatgroups/{ids['chatgroup_id']}/search",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"q": "hiking"},
+        )
+    assert response.status_code == 422
+    assert "gone" in response.json()["detail"]
 
 
 def _hit_tokens(data: dict) -> dict[str, int]:

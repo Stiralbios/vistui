@@ -101,10 +101,10 @@ _SERVER_RESPONSE: dict = {
 
 
 def test_decision_defaults_from_env_fallback():
-    """Without providers.yaml, decisions fall back to the env-configured model."""
+    """Without a settings file, decisions fall back to the env-configured model."""
     config = _test_config()
-    assert config.defaults.decision.model == "d3:4b"
-    assert config.defaults.decision.provider == "default"
+    assert config.defaults_models.decision.model == "d3:4b"
+    assert config.defaults_models.decision.provider == "default"
     assert "default" in config.providers
 
 
@@ -152,10 +152,10 @@ async def test_decide_builds_request_and_parses_answers():
 async def test_decide_resolves_task_override():
     """A decision task resolves against the same overrides map as chat tasks: decide()
     with task='salience' posts to the override's provider and model, while taskless
-    calls keep defaults.decision."""
+    calls keep defaults_models.decision."""
     config = _test_config()
     config.providers["direct"] = ProviderSpec(base_url="http://direct.test/v1", api_key_env="VISTUI_LLM_API_KEY")
-    config.overrides["salience"] = TaskConfig(provider="direct", model="other-d3")
+    config.overrides_models["salience"] = TaskConfig(provider="direct", model="other-d3")
 
     captured: list = []
     provider = Provider(config)

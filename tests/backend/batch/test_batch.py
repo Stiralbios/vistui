@@ -117,7 +117,7 @@ async def _make_test_chat(
         name="Test ChatGroup",
         config=config,
         prompts=prompts_data,
-        ranking_formula="lambda vector_score, bm25_score, salience, linked_count: vector_score",
+        ranking_formula="default",
     )
     session.add(chatgroup)
     await session.flush()

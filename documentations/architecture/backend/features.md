@@ -23,7 +23,7 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 ### Business Rules
 
 - Owned by a User.
-- Contains config, prompts, and `ranking_formula`.
+- Contains config, prompts, and `ranking_formula` — the name of a formula defined in the settings file's `ranking_formulas` section.
 - At creation, config, prompts, and ranking formula are copied from system defaults unless explicitly supplied.
 - Deleting a ChatGroup cascades to Chats, Messages, Events, Topics, and Facts.
 

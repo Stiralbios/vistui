@@ -2,7 +2,8 @@ import itertools
 import uuid
 
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import DEFAULT_RANKING_FORMULA, ChatGroupConfig, ChatGroupPrompts, ChatGroupRead
+from backend.chatgroup.schemas import ChatGroupConfig, ChatGroupPrompts, ChatGroupRead
+from backend.search.formulas import DEFAULT_RANKING_FORMULA_NAME
 from polyfactory import Use
 
 from tests.backend.config import BaseFactory
@@ -27,7 +28,7 @@ class ChatGroupFactory(BaseFactory[ChatGroupDO]):
     description = Use(_next_description)
     config = ChatGroupConfig().model_dump()
     prompts = ChatGroupPrompts().model_dump()
-    ranking_formula = DEFAULT_RANKING_FORMULA
+    ranking_formula = DEFAULT_RANKING_FORMULA_NAME
 
     @classmethod
     def to_api_response_data(cls, orm_model: ChatGroupDO | list[ChatGroupDO]) -> dict | list[dict]:

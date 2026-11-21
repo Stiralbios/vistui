@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Keep the decision model loaded between the per-element calls of a round.
 KEEP_ALIVE = "10m"
 
-# Decision task name, resolved against the providers.yaml overrides by
+# Decision task name, resolved against the settings.yaml overrides by
 # Provider.decide (falling back to defaults.decision).
 SALIENCE_TASK = "salience"
 

@@ -190,6 +190,29 @@ async def test_update_chatgroup_custom_salience_prompt(client: AsyncClient):
     assert prompts["salience_rubric"] == ["Forgettable.", "Essential."]
 
 
+async def test_update_chatgroup_ranking_formula(client: AsyncClient):
+    """The ranking formula is switched by name: a settings-registered name is stored,
+    an undefined one is rejected with 422."""
+    token = await login(client, "test@example.com", "devpassword123")
+    chatgroup_data = await _create_chatgroup(client, token)
+    assert chatgroup_data["ranking_formula"] == "default"
+
+    response = await client.patch(
+        f"/api/v1/chatgroups/{chatgroup_data['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"ranking_formula": "gone"},
+    )
+    assert response.status_code == 422
+
+    response = await client.patch(
+        f"/api/v1/chatgroups/{chatgroup_data['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"ranking_formula": "default"},
+    )
+    assert response.status_code == 200
+    assert response.json()["ranking_formula"] == "default"
+
+
 async def test_chatgroup_use_salience_must_be_boolean(client: AsyncClient):
     """use_salience is a plain boolean: missing defaults to true, and JSON null is
     rejected."""

@@ -91,7 +91,7 @@ class DecisionAnswer(BaseModel):
 class Provider:
     """LangChain-based async provider wrapper used by the batch worker.
 
-    Provider and model selection is driven by ``providers.yaml`` (see
+    Provider and model selection is driven by ``settings.yaml`` (see
     ``documentations/architecture/llm-provider.md``). The ``task`` argument to
     ``chat`` selects the per-task override defined in that file. Decision models
     (``decide``) are System One models called through ollama's ``/v1/systemone``
@@ -108,7 +108,7 @@ class Provider:
         return SecretStr("ollama")
 
     def _build_embedding_model(self) -> OpenAIEmbeddings:
-        embedding_defaults = self.config.defaults.embedding
+        embedding_defaults = self.config.defaults_models.embedding
         provider = self.config.providers[embedding_defaults.provider]
         return OpenAIEmbeddings(
             base_url=provider.base_url,
@@ -125,8 +125,8 @@ class Provider:
         temperature: float | None,
         max_tokens: int | None,
     ) -> LLMDefaults:
-        defaults = self.config.defaults.llm
-        override = self.config.overrides.get(task)
+        defaults = self.config.defaults_models.llm
+        override = self.config.overrides_models.get(task)
         if override is None:
             resolved_temperature = temperature if temperature is not None else defaults.temperature
             resolved_max_tokens = max_tokens if max_tokens is not None else defaults.max_tokens
@@ -171,7 +171,7 @@ class Provider:
             raise EmbeddingError(f"Embedding request failed: {exc}") from exc
 
         embeddings: list[list[float]] = []
-        expected = self.config.defaults.embedding.dimensions
+        expected = self.config.defaults_models.embedding.dimensions
         for vector in vectors:
             if not isinstance(vector, list) or len(vector) != expected:
                 raise EmbeddingError(
@@ -295,9 +295,9 @@ class Provider:
         """Resolve the provider spec and model for a decision call: the per-task
         override when one exists (same overrides map as chat tasks), else
         ``defaults.decision``."""
-        decision = self.config.defaults.decision
+        decision = self.config.defaults_models.decision
         provider_name, model = decision.provider, decision.model
-        if task is not None and (override := self.config.overrides.get(task)) is not None:
+        if task is not None and (override := self.config.overrides_models.get(task)) is not None:
             provider_name = override.provider or provider_name
             model = override.model or model
         return self.config.providers[provider_name], model

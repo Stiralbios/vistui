@@ -1,3 +1,12 @@
+# Named ranking formulas for the hybrid search: chatgroups reference them by name
+# (see documentations/architecture/retrieval-system.md). The `default` entry below
+# is the same formula the code carries as its built-in, spelled out for easy
+# copying; the section may override it or add further names.
+ranking_formulas:
+  default: >-
+    lambda vector_score, bm25_score, salience, linked_count:
+    max(vector_score, bm25_score) * salience * link_weight(linked_count)
+
 providers:
   local-ollama:
     base_url: "http://192.168.9.137:11434/v1"
@@ -15,7 +24,7 @@ providers:
     api_key_env: "GOMODEL_TOKEN"
     timeout_seconds: 120
 
-defaults:
+defaults_models:
   embedding:
     provider: "gomodel"
     model: "ollama_yople/embeddinggemma-2:740m"
@@ -35,7 +44,7 @@ defaults:
 # Per-task overrides: the explicit tuning surface for individual pipeline tasks, for
 # chat tasks and decision tasks alike (decide(task=...) resolves here too). The chat
 # entries currently duplicate defaults.llm; 4.5 will split them (decision vs generation).
-overrides:
+overrides_models:
   # Decision tasks (System One /v1/systemone), not chat tasks: they must point at a
   # directly reachable ollama provider — gomodel cannot forward /v1/systemone.
   salience:

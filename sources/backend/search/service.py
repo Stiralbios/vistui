@@ -24,6 +24,7 @@ from backend.search.budget import (
     normalize_probabilities,
     pack_token_budget,
 )
+from backend.search.formulas import ranking_formula_text
 from backend.search.schemas import SearchHit, SearchResponse
 from backend.search.scoring import clamp_unit, evaluate_ranking_formula, normalize_bm25
 from backend.topic.models import TopicDO, TopicMessageLinkDO
@@ -39,7 +40,7 @@ _CANDIDATE_LIMIT = 30
 # Salience used by the formula when the object has no score or the chatgroup ignores salience.
 _NEUTRAL_SALIENCE = 1.0
 
-# Decision task resolving the memory-ratio override in providers.yaml, and the name
+# Decision task resolving the memory-ratio override in settings.yaml, and the name
 # of the single choice question asked in the ratio decide() call. The decision model
 # is kept loaded between searches so the opt-in costs one call, not one model load.
 _MEMORY_RATIO_TASK = "memory_ratio"
@@ -141,7 +142,11 @@ def _rank_hit(chatgroup: ChatGroupInternal, candidate: SearchHit, bm25_max: floa
     vector_score = clamp_unit(candidate.vector_score)
     bm25_score = normalize_bm25(candidate.bm25_score, bm25_max)
     score = evaluate_ranking_formula(
-        chatgroup.ranking_formula, vector_score, bm25_score, candidate.salience, candidate.linked_count
+        ranking_formula_text(chatgroup.ranking_formula),
+        vector_score,
+        bm25_score,
+        candidate.salience,
+        candidate.linked_count,
     )
     return candidate.model_copy(update={"score": score, "vector_score": vector_score, "bm25_score": bm25_score})
 

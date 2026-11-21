@@ -27,11 +27,21 @@ calls). Decision calls need an ollama System One endpoint (see below).
 
 ## Configuration
 
-Providers are declared in a YAML file loaded at startup. Secrets are injected via environment variables.
+Providers and ranking formulas are declared in a YAML settings file loaded at startup.
+Secrets are injected via environment variables.
 
-### Example `providers.yaml`
+### Example `settings.yaml`
 
 ```yaml
+# Named ranking formulas for the hybrid search: chatgroups reference them by name,
+# and the API accepts names only (unknown names are rejected with 422). The
+# `default` entry is the same formula the code carries as its built-in; the section
+# may override it or add further names.
+ranking_formulas:
+  default: >-
+    lambda vector_score, bm25_score, salience, linked_count:
+    max(vector_score, bm25_score) * salience * link_weight(linked_count)
+
 providers:
   local-ollama:
     base_url: "http://localhost:11434/v1"
@@ -43,7 +53,7 @@ providers:
     api_key_env: "REMOTE_API_KEY"
     timeout_seconds: 120
 
-defaults:
+defaults_models:
   embedding:
     provider: "local-ollama"
     model: "nomic-embed-text"
@@ -57,7 +67,7 @@ defaults:
     provider: "local-ollama"
     model: "d3:4b"
 
-overrides:
+overrides_models:
   # Decision tasks (salience, memory_ratio): their providers must be a directly
   # reachable ollama System One endpoint (not a chat model).
   salience:
@@ -94,7 +104,7 @@ overrides:
 |----------|---------|
 | `OLLAMA_API_KEY` | API key for the `local-ollama` provider. |
 | `REMOTE_API_KEY` | API key for the `remote-llm` provider. |
-| `VISTUI_PROVIDERS_FILE` | Path to `providers.yaml` (default `./providers.yaml`). |
+| `VISTUI_SETTINGS_FILE` | Path to `settings.yaml` (default `./settings.yaml`). |
 | `VISTUI_DECISION_MODEL` | Decision model for the legacy env fallback (`d3:4b`). |
 
 If `api_key_env` is not set, the provider is used without authentication (common for local Ollama).
@@ -185,7 +195,7 @@ conversational text.
 
 | Concern | Owned by |
 |---------|----------|
-| Which provider/model/temperature to use | `providers.yaml`. |
+| Which provider/model/temperature to use | `settings.yaml`. |
 | How to format the request | Provider adapter. |
 | What text to send and how to interpret the response | Prompt template and task code. |
 | Where prompts are stored | ChatGroup `prompts` JSONB. |
@@ -219,3 +229,10 @@ conversational text.
   with the element type) and the new `salience_rubric` key holds the ordered rubric
   levels (2-10); score normalization adapts to the rubric length.
 - 2026-11-15: `decide()` gained the `task` parameter (overrides map now serves decision tasks too); the salience stages score messages and memory objects with `d3:4b` against a 5-level rubric, `keep_alive` keeps the model warm between rounds.
+
+- 2026-11-21: `providers.yaml` renamed to `settings.yaml` — the operator's single
+  settings file. The model sections became `defaults_models` and `overrides_models`
+  (same content), and the file gained the `ranking_formulas` section: named ranking
+  formulas referenced by chatgroups (the API accepts names only, closing the
+  arbitrary-code-execution issue of formula authorship via the API). The env var
+  `VISTUI_PROVIDERS_FILE` became `VISTUI_SETTINGS_FILE`.

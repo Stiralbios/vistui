@@ -7,9 +7,9 @@ from pydantic_settings import BaseSettings
 
 
 class LLMSettings(BaseSettings):
-    """Legacy environment-based settings used as a fallback when providers.yaml is missing."""
+    """Legacy environment-based settings used as a fallback when settings.yaml is missing."""
 
-    VISTUI_PROVIDERS_FILE: str = "./providers.yaml"
+    VISTUI_SETTINGS_FILE: str = "./settings.yaml"
     VISTUI_LLM_BASE_URL: str = "http://192.168.9.137:11434/v1"
     VISTUI_LLM_API_KEY: SecretStr | None = None
     VISTUI_EMBEDDING_MODEL: str = "embeddinggemma-2:740m"
@@ -72,11 +72,11 @@ class TaskConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
-    """Loaded from providers.yaml."""
+    """Loaded from settings.yaml."""
 
     providers: dict[str, ProviderSpec]
-    defaults: DefaultsConfig
-    overrides: dict[str, TaskConfig] = Field(default_factory=dict)
+    defaults_models: DefaultsConfig
+    overrides_models: dict[str, TaskConfig] = Field(default_factory=dict)
 
     @classmethod
     def from_file(cls, path: str | Path) -> Self:
@@ -99,7 +99,7 @@ class ProviderConfig(BaseModel):
                     timeout_seconds=settings.VISTUI_LLM_TIMEOUT_SECONDS,
                 )
             },
-            defaults=DefaultsConfig(
+            defaults_models=DefaultsConfig(
                 embedding=EmbeddingDefaults(
                     provider="default",
                     model=settings.VISTUI_EMBEDDING_MODEL,
@@ -127,7 +127,7 @@ def get_provider_config() -> ProviderConfig:
     global _config
     if _config is None:
         settings = LLMSettings()
-        path = Path(settings.VISTUI_PROVIDERS_FILE).expanduser()
+        path = Path(settings.VISTUI_SETTINGS_FILE).expanduser()
         if path.exists():
             _config = ProviderConfig.from_file(path)
         else:

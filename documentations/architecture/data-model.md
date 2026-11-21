@@ -109,7 +109,7 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `description` | string | Optional summary. |
 | `config` | JSONB | All tunable settings (see below). |
 | `prompts` | JSONB | Prompt templates stored as strings. |
-| `ranking_formula` | text | Python lambda source, evaluated with `asteval`. |
+| `ranking_formula` | text | Name of a formula defined in the settings file's `ranking_formulas` section (default `"default"`). |
 | `created_at` | datetime | Automatic. |
 | `updated_at` | datetime | Automatic. |
 
@@ -290,7 +290,7 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
 3. Message `prev_message_id` and `next_message_id` must be consistent within a Chat.
 4. `role` must be one of `system`, `user`, `assistant`.
 5. `salience_score` must be in `[0.0, 1.0]` when set; it is `null` until the salience pipeline scores the row (and stays `null` for chatgroups with `use_salience` false, which opt out).
-6. `ranking_formula` must be a Python lambda expression over `(vector_score, bm25_score, salience, linked_count)`.
+6. `ranking_formula` must name a formula defined in the settings file's `ranking_formulas` section; the formulas themselves are lambda expressions over `(vector_score, bm25_score, salience, linked_count)`.
 7. A message is eligible for event/topic/fact consolidation once it is outside its chat's protected window — `embedding` and `salience_score` are not prerequisites.
 8. A `null` `salience_score` does not exclude a row from retrieval: the ranking formula gets the neutral 1.0. A `null` embedding excludes the row from the vector channel only (BM25 still finds it).
 
@@ -311,3 +311,8 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
   column; topic/fact clients no longer supply it).
 - 2026-07-11: Initial data model derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: memory_ratio is now a config default with optional LLM override, split fact prompts into `fact_candidate` and `fact_update`, split topic prompts into `topic_candidate` and `topic_update`, added embedding/salience as prerequisite batch pipelines.
+
+- 2026-11-21: `chatgroup.ranking_formula` stores the name of a formula defined in
+  the settings file's `ranking_formulas` section (migration `0007` rewrote the
+  built-in default formula source into `"default"`). The column keeps its name and
+  type; only its semantics changed.

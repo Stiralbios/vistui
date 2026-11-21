@@ -2,17 +2,9 @@ import datetime as dt
 import uuid
 from typing import Any
 
+from backend.search.formulas import DEFAULT_RANKING_FORMULA_NAME, get_ranking_formulas
 from backend.settings import AppSettings
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-# Ranking default: both score channels are normalized to 0..1 by `backend.search.scoring`
-# before the formula runs, and `link_weight` gives an unconsolidated item 0.5 and a
-# 100-link item 1.0 (logarithmic in between). Formulas are user-authored and evaluated
-# with `eval`, which is not a security boundary (see `backend.search.scoring`).
-DEFAULT_RANKING_FORMULA = (
-    "lambda vector_score, bm25_score, salience, linked_count: "
-    "max(vector_score, bm25_score) * salience * link_weight(linked_count)"
-)
 
 # Ordered default rubric for the salience decision question, lowest level first: the
 # decision model's answer is a probability-weighted zero-based level index, normalized
@@ -103,9 +95,12 @@ class ChatGroupPrompts(BaseModel):
 class ChatGroupBase(BaseModel):
     name: str = Field(max_length=255)
     description: str | None = Field(default=None, max_length=1024)
-    # Pydantic-level default shared by every create schema (ChatGroupCreate and its
-    # Internal variant); the column itself has no server default on purpose.
-    ranking_formula: str = DEFAULT_RANKING_FORMULA
+    # Name of a formula registered in the settings file's ranking_formulas section.
+    # The write schemas validate it against the registry — the API accepts names
+    # only, never formula source. Pydantic-level default shared by every create
+    # schema (ChatGroupCreate and its Internal variant); the column itself has no
+    # server default on purpose.
+    ranking_formula: str = DEFAULT_RANKING_FORMULA_NAME
 
 
 class ChatGroupRead(ChatGroupBase):
@@ -127,6 +122,14 @@ class ChatGroupInternal(ChatGroupRead):
 class ChatGroupCreate(ChatGroupBase):
     config: ChatGroupConfig = Field(default_factory=ChatGroupConfig)
     prompts: ChatGroupPrompts = Field(default_factory=ChatGroupPrompts)
+
+    @field_validator("ranking_formula")
+    @classmethod
+    def validate_ranking_formula(cls, value: str) -> str:
+        """Only names registered in the settings file are accepted."""
+        if value not in get_ranking_formulas():
+            raise ValueError(f"unknown ranking formula name: {value}")
+        return value
 
 
 class ChatGroupContext(BaseModel):
@@ -153,6 +156,14 @@ class ChatGroupUpdate(BaseModel):
     def prevent_explicit_none(cls, value: Any) -> Any:
         if value is None:
             raise ValueError("Explicit None is not allowed for this field")
+        return value
+
+    @field_validator("ranking_formula")
+    @classmethod
+    def validate_ranking_formula(cls, value: str) -> str:
+        """Only names registered in the settings file are accepted."""
+        if value not in get_ranking_formulas():
+            raise ValueError(f"unknown ranking formula name: {value}")
         return value
 
 

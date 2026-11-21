@@ -7,6 +7,7 @@ class ProblemKind(StrEnum):
     NOT_FOUND = auto()
     ALREADY_EXIST = auto()
     NOT_ALLOWED = auto()
+    INVALID = auto()
 
 
 class Entity(StrEnum):
@@ -17,6 +18,7 @@ class Entity(StrEnum):
     EVENT = auto()
     TOPIC = auto()
     FACT = auto()
+    RANKING_FORMULA = auto()
 
 
 class BaseProblem(Exception):
@@ -160,3 +162,9 @@ class FactNotAllowedProblem(BaseProblem):
     kind = ProblemKind.NOT_ALLOWED
     status = status.HTTP_403_FORBIDDEN
     entity = Entity.FACT
+
+
+class RankingFormulaInvalidProblem(BaseProblem):
+    kind = ProblemKind.INVALID
+    status = status.HTTP_422_UNPROCESSABLE_ENTITY
+    entity = Entity.RANKING_FORMULA
