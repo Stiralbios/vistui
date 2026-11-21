@@ -21,10 +21,13 @@ class BatchWorker:
     """Runs one consolidation round over all pipelines, in dependency order:
     embeddings first, then the event/topic/fact LLM pipelines.
 
-    Progress is mirrored into `batch_status` for the admin API; a failing pipeline marks
-    the message it was working on as FAILED without blocking the remaining pipelines.
-    The batch stages (embeddings, salience) work on NULL-column queues: a failed round
-    rolls back, the column stays NULL, and the next round retries for free.
+    Progress is mirrored into `batch_status` for the admin API. The consolidation
+    pipelines isolate failures per message themselves (a failed message keeps its
+    waiting flag with the failure recorded on it, and the round continues); the outer
+    catch below remains the safety net for failures with no single message to
+    attribute, and marks the peeked message FAILED. The batch stages (embeddings,
+    salience) work on NULL-column queues: a failed round rolls back, the column stays
+    NULL, and the next round retries for free.
     """
 
     def __init__(self) -> None:
@@ -53,7 +56,7 @@ class BatchWorker:
 
             # (name used for status/logs and as processing_state key, async callable).
             # The per-round work limits come from the VISTUI_BATCH_* settings; the
-            # consolidation pipelines event/topic/fact are single-message by design.
+            # consolidation pipelines event/topic/fact process messages one by one.
             pipelines: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
                 ("embedding", partial(embed_messages, limit=settings.VISTUI_BATCH_EMBEDDING_LIMIT)),
                 (
@@ -65,9 +68,9 @@ class BatchWorker:
                     "memory_salience",
                     partial(score_memory_objects, limit=settings.VISTUI_BATCH_MEMORY_SALIENCE_LIMIT),
                 ),
-                ("event", partial(EventPipeline.run_round, block_size=settings.VISTUI_BATCH_EVENT_BLOCK_SIZE)),
-                ("topic", TopicPipeline.run_round),
-                ("fact", FactPipeline.run_round),
+                ("event", partial(EventPipeline.run_round, limit=settings.VISTUI_BATCH_EVENT_MESSAGE_LIMIT)),
+                ("topic", partial(TopicPipeline.run_round, limit=settings.VISTUI_BATCH_TOPIC_MESSAGE_LIMIT)),
+                ("fact", partial(FactPipeline.run_round, limit=settings.VISTUI_BATCH_FACT_MESSAGE_LIMIT)),
             ]
 
             for pipeline_name, pipeline in pipelines:

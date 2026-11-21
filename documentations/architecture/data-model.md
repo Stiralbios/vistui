@@ -137,7 +137,9 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `salience_rubric` | Ordered rubric levels (2-10, lowest first) the decision model scores against; the answer is normalized by `len - 1`. |
 | `memory_ratio` | Instructions of the memory-ratio choice question (decision task). |
 | `memory_ratio_criteria` | Criteria of the memory-ratio choice question, keyed by memory type (labels fixed, descriptions reworded; at least two entries, a type left out gets no retrieval share). |
-| `event` | Summarize a contiguous block of messages into one or more events. |
+| `event_boundary` | Instructions of the per-message event boundary choice question (decision task): how the message relates to the chat's last event. |
+| `event_boundary_criteria` | Criteria of the boundary question — keys ⊆ `extend`/`new`/`mixed` (at least two), values their descriptions. |
+| `event_summary` | Rebuild an event's summary from its full member list; must contain the `{messages}` placeholder. |
 | `topic_candidate` | Select up to `max_topics_per_message` existing topics to update, or decide to create new topics. |
 | `topic_update` | Update a specific topic given the message and ChatGroup context. |
 | `fact_candidate` | Select up to `max_facts_per_message` existing facts to update, or decide to create a new fact. |
@@ -208,7 +210,10 @@ Each pipeline can be interrupted and retried independently. A state of `failed` 
 
 ### Event
 
-A time-bounded summary of contiguous messages within a Chat. A single message can contribute to multiple events if the LLM decides the message spans event boundaries.
+A time-bounded summary of contiguous messages within a Chat, built incrementally one
+message at a time: a per-message boundary decision extends the last event, opens a
+new one, or does both (`mixed`) when the message spans the boundary — so a single
+message can contribute to two events, and event spans have no fixed size.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -223,9 +228,11 @@ A time-bounded summary of contiguous messages within a Chat. A single message ca
 | `created_at` | datetime | Automatic. |
 | `updated_at` | datetime | Automatic. |
 
-An Event links to one or more contiguous Messages via a join table `event_message_links`.
+An Event links to one or more Messages via a join table `event_message_links`.
 Like messages, topics and facts, an event's `edited_at` records when its text was last
-written (set at creation, bumped on every later write).
+written (set at creation, bumped on every later write). A rewritten event — extended
+or concluded by a later message — has its summary rebuilt from the full member list
+and its embedding/salience cleared for regeneration, exactly like a topic/fact update.
 
 ### Topic
 
@@ -279,7 +286,7 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
 | ChatGroup | User | Persistent. |
 | Chat | ChatGroup | Persistent. Cannot change ChatGroup. |
 | Message | Chat | Overwritten in place on edit. |
-| Event | Chat | Rewritten until finished; finished events are immutable. |
+| Event | Chat | Built incrementally; extended or concluded by later messages (embedding/salience invalidated on rewrite). |
 | Topic | ChatGroup | Rewritten when revisited. |
 | Fact | ChatGroup | Rewritten when truth changes. |
 
@@ -301,6 +308,12 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
 
 ## Changelog
 
+- 2026-11-22 (issue 007): Events are built by a per-message boundary decision
+  (extend / new / mixed) against the chat's last event: spans are unbounded, summaries
+  are always rebuilt from the full member list, and a rewritten event is invalidated
+  like a topic/fact update (`edited_at` bumped, embedding and salience cleared). The
+  `event` prompts key is replaced by `event_boundary`, `event_boundary_criteria` and
+  `event_summary`.
 - 2026-11-21: New prompts key `memory_ratio_criteria` (criteria descriptions of the
   memory-ratio choice question, keyed by memory type). Token estimates for retrieval
   packing are BPE counts (tiktoken `cl100k_base`), whitespace words as fallback.

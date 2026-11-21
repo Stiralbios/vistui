@@ -29,6 +29,17 @@ DEFAULT_MEMORY_RATIO_CRITERIA = {
     "fact": "A small persistent fact about the user or the world state.",
 }
 
+# Criteria of the event-boundary choice question, keyed by action: the event pipeline
+# decides per message whether it extends the chat's last event, starts a new one, or
+# both concludes the last and starts the next. The pipeline switches on the keys, so
+# they are fixed to the three actions while chatgroups reword the descriptions (a
+# subset forbids an action).
+DEFAULT_EVENT_BOUNDARY_CRITERIA = {
+    "extend": "The message continues the last event: same activity, subject or exchange.",
+    "new": "The message starts a distinct new event: new subject or activity, or a clear break.",
+    "mixed": "The message concludes the last event and also starts the next one.",
+}
+
 
 class MemoryRatio(BaseModel):
     message: float = 0.40
@@ -72,7 +83,25 @@ class ChatGroupPrompts(BaseModel):
     # Criteria of the memory-ratio choice question, keyed by memory type (at least
     # two entries — choice questions need two or more options).
     memory_ratio_criteria: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_MEMORY_RATIO_CRITERIA))
-    event: str = "Summarize a contiguous block of messages into one or more events."
+    # Instructions of the event-boundary choice question: how the next message relates
+    # to the chat's last event (the state carries both, the criteria carry the three
+    # actions).
+    event_boundary: str = (
+        "Decide how the message in the state relates to the last event: it continues it, "
+        "starts a distinct new event, or both concludes the last event and starts the next."
+    )
+    # Criteria of the event-boundary choice question, keyed by action: extend/new/mixed.
+    # Subsets are allowed (at least two options), so a chatgroup can forbid an action.
+    event_boundary_criteria: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_EVENT_BOUNDARY_CRITERIA))
+    # Generation template for event summaries: `{messages}` is substituted with the
+    # event's full message list — the summary is always rebuilt from the sources, so
+    # extending an event never rewrites from its previous summary.
+    event_summary: str = (
+        "Summarize the following chat messages into one concise event summary: what "
+        "happened or was discussed, in order.\n\n"
+        'Return strictly a JSON object with the shape:\n{{"summary": "..."}}\n\n'
+        "Messages:\n{messages}"
+    )
     topic_candidate: str = "Select existing topics to update or decide to create a new topic."
     topic_update: str = "Update a specific topic given the message and ChatGroup context."
     fact_candidate: str = "Select existing facts to update or decide to create a new fact."
@@ -89,6 +118,32 @@ class ChatGroupPrompts(BaseModel):
             raise ValueError(f"memory_ratio_criteria keys must be memory types, got: {sorted(unknown)}")
         if len(value) < 2:
             raise ValueError("memory_ratio_criteria needs at least two entries")
+        return value
+
+    @field_validator("event_boundary_criteria")
+    @classmethod
+    def validate_event_boundary_criteria(cls, value: dict[str, str]) -> dict[str, str]:
+        """The criteria keys must be the pipeline's actions — the event pipeline switches
+        on them — and choice questions need at least two options."""
+        unknown = set(value) - set(DEFAULT_EVENT_BOUNDARY_CRITERIA)
+        if unknown:
+            raise ValueError(f"event_boundary_criteria keys must be event actions, got: {sorted(unknown)}")
+        if len(value) < 2:
+            raise ValueError("event_boundary_criteria needs at least two entries")
+        return value
+
+    @field_validator("event_summary")
+    @classmethod
+    def validate_event_summary(cls, value: str) -> str:
+        """The template is formatted with the event's message list: without the
+        `{messages}` placeholder the summary would be built from nothing, and an
+        otherwise-unformattable template (stray braces) would fail every message."""
+        if "{messages}" not in value:
+            raise ValueError("event_summary must contain the {messages} placeholder")
+        try:
+            value.format(messages="sample")
+        except (KeyError, IndexError, ValueError) as exc:
+            raise ValueError(f"event_summary is not a valid format template: {exc}") from exc
         return value
 
 

@@ -233,4 +233,45 @@ Right now the base just grow and grow. Hopefully the system is able to catch stu
 same topic/fact but all of this happen on message ingestion. There is nothing to consolidate if there is
 too many similar ones
 
+## Issue 007 — Event consolidation groups fixed 10-message blocks
 
+- **Status (2026-11-22): DONE** — fixed by the streaming event builder (see
+  `plan/plan7.md` Results). As built:
+  - Each round takes up to `VISTUI_BATCH_EVENT_MESSAGE_LIMIT` (10) waiting messages;
+    for each, a decision-model call (`event_boundary`, `d3:4b`) answers one `boundary`
+    choice question (criteria `extend` / `new` / `mixed` from the chatgroup's
+    `event_boundary_criteria`) against the chat's last event. A chat without events
+    opens one directly (no decision call).
+  - Summaries are always rebuilt from the event's full member list through the
+    `event_summary` template (`{messages}` placeholder), so extensions cannot drift.
+    Rewriting an event (extend/mixed) invalidates it like topic/fact updates:
+    `edited_at` bumped, `embedding` and `salience_score` cleared.
+  - Topic and fact stages process `VISTUI_BATCH_TOPIC/FACT_MESSAGE_LIMIT` (5) messages
+    per round; every stage processes messages one by one, each in its own transaction.
+    A failed message keeps its waiting flag — later rounds retry it for free — with
+    `retry_count` / `last_failure_at` recorded, and the round continues.
+  - The chatgroup prompts key `event` is gone (stored rows keep parsing: unknown keys
+    are ignored); `VISTUI_BATCH_EVENT_BLOCK_SIZE` is gone, no back-compat.
+- **Reported / decided:** 2026-11-22
+
+### Summary
+
+`EventPipeline` groups messages into events through fixed contiguous blocks of
+`VISTUI_BATCH_EVENT_BLOCK_SIZE` (10) messages: one LLM call per block, and every
+block member is force-marked event DONE afterwards. The LLM decides splits only
+*within* a block, so an event can never span a block boundary — a 25-message
+discussion is cut at 10 and 20 — and a missing grouping lumps the whole block into
+one "General conversation block" event. Related: the topic and fact pipelines process
+exactly one message per worker round, which makes their throughput a round per
+message.
+
+### Decision
+
+Streaming event builder, decided 2026-11-22 (see `plan/plan7.md`): each round takes
+the next waiting message plus the chat's last event, and a decision-model call
+chooses extend / new / mix (message closes the last event and opens the next). Two
+chatgroup-configurable prompts — `event_boundary` (decision) and `event_summary`
+(generation; always summarizes from all the event's member messages, so extensions
+cannot drift) — and extend rewrites invalidate the row like topic/fact updates
+(edited_at bumped, embedding/salience NULLed). Event, topic and fact stages get
+per-round message limits like salience (5) and embedding (32).

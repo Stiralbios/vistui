@@ -68,15 +68,18 @@ defaults_models:
     model: "d3:4b"
 
 overrides_models:
-  # Decision tasks (salience, memory_ratio): their providers must be a directly
-  # reachable ollama System One endpoint (not a chat model).
+  # Decision tasks (salience, memory_ratio, event_boundary): their providers must be
+  # a directly reachable ollama System One endpoint (not a chat model).
   salience:
     provider: "local-ollama"
     model: "d3:4b"
   memory_ratio:
     provider: "local-ollama"
     model: "d3:4b"
-  event:
+  event_boundary:
+    provider: "local-ollama"
+    model: "d3:4b"
+  event_summary:
     provider: "remote-llm"
     model: "gpt-4o-mini"
     temperature: 0.2
@@ -138,7 +141,7 @@ class Provider:
     ) -> dict[str, DecisionAnswer]: ...
 ```
 
-- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`). The same overrides map serves chat tasks and decision tasks: the batch salience stage calls `decide(..., task="salience")` and the search ratio call uses `task="memory_ratio"`; both resolve their override with `defaults.decision` as fallback.
+- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event_boundary`, `event_summary`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`). The same overrides map serves chat tasks and decision tasks: the batch salience stage calls `decide(..., task="salience")`, the event boundary call uses `task="event_boundary"` and the search ratio call `task="memory_ratio"`; both resolve their override with `defaults.decision` as fallback.
 - If no override exists for a task, the `defaults.llm`, `defaults.embedding` or `defaults.decision` config is used.
 - The adapter parses the YAML and resolves `api_key_env` once at startup. The file can be reloaded on SIGHUP or via an admin endpoint.
 
@@ -161,7 +164,8 @@ class Provider:
 |----------|--------|
 | `salience` | message text, role, ChatGroup description. The template's `{kind}` is substituted with the element type; the question's criteria come from the chatgroup's `salience_rubric` prompts key (2-10 ordered levels, 5-level default). |
 | `memory_ratio` | ChatGroup description, search query (the decide state). A decision task: the template becomes the instructions of one choice question whose criteria come from the chatgroup's `memory_ratio_criteria` prompts key (labels fixed to the memory types, at least two); the answer's probabilities are the distribution. |
-| `event` | contiguous message block, existing event summary (if continuing). |
+| `event_boundary` | ChatGroup description, the chat's last event (summary, time range), the new message (role, text, created_at). A decision task: the template becomes the instructions of one choice question whose criteria come from the chatgroup's `event_boundary_criteria` prompts key (extend / new / mixed); the highest-probability criterion wins. |
+| `event_summary` | the event's full member list, oldest first (`{messages}`). Always rebuilt from the sources, never from the previous summary. |
 | `topic_candidate` | existing topic summaries, new message, `max_topics_per_message`. |
 | `topic_update` | existing topic, new message, ChatGroup context. |
 | `fact_candidate` | existing fact summaries, new message, `max_facts_per_message`. |
@@ -214,6 +218,9 @@ conversational text.
 
 ## Changelog
 
+- 2026-11-22 (issue 007): The event task split into `event_boundary` (decision model:
+  per-message extend/new/mixed choice against the chat's last event) and
+  `event_summary` (chat model: rebuild an event's summary from its full member list).
 - 2026-11-21: `memory_ratio` is a decision task (System One choice question over the
   memory types, one `decide()` call per opted-in search; probabilities are the
   distribution): its override must point at a directly reachable ollama endpoint, so

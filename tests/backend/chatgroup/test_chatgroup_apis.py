@@ -1,6 +1,7 @@
 import uuid
 
 from backend.auth.schemas import Token
+from backend.chatgroup.schemas import DEFAULT_EVENT_BOUNDARY_CRITERIA, ChatGroupPrompts
 from httpx import AsyncClient
 
 
@@ -167,6 +168,88 @@ async def test_create_chatgroup_validates_memory_ratio_criteria(client: AsyncCli
     )
     assert response.status_code == 201
     assert response.json()["prompts"]["memory_ratio_criteria"] == {"message": "Words.", "topic": "Themes."}
+
+
+async def test_create_chatgroup_validates_event_boundary_criteria(client: AsyncClient):
+    """The event-boundary criteria drive the extend/new/mixed choice question of the
+    streaming event pipeline: unknown keys are rejected (the pipeline switches on the
+    three actions), at least two options must be offered (choice questions), and
+    subsets are accepted so a chatgroup can forbid an action."""
+    token = await login(client, "test@example.com", "devpassword123")
+
+    for criteria in (
+        {"gibberish": "Something.", "extend": "It continues."},
+        {"new": "Only one option."},
+    ):
+        response = await client.post(
+            "/api/v1/chatgroups",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "Boundary Group", "prompts": {"event_boundary_criteria": criteria}},
+        )
+        assert response.status_code == 422
+
+    response = await client.post(
+        "/api/v1/chatgroups",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Boundary Group",
+            "prompts": {"event_boundary_criteria": {"extend": "It continues.", "new": "It starts."}},
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["prompts"]["event_boundary_criteria"] == {
+        "extend": "It continues.",
+        "new": "It starts.",
+    }
+
+
+async def test_create_chatgroup_validates_event_summary_placeholder(client: AsyncClient):
+    """The event summary template is formatted with the event's message list: a
+    template without the {messages} placeholder would summarize nothing, so it is
+    rejected at write time."""
+    token = await login(client, "test@example.com", "devpassword123")
+
+    response = await client.post(
+        "/api/v1/chatgroups",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Summary Group", "prompts": {"event_summary": "Summarize."}},
+    )
+    assert response.status_code == 422
+
+    response = await client.post(
+        "/api/v1/chatgroups",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Summary Group", "prompts": {"event_summary": "Summarize.\n{messages}"}},
+    )
+    assert response.status_code == 201
+    assert response.json()["prompts"]["event_summary"] == "Summarize.\n{messages}"
+
+
+async def test_create_chatgroup_rejects_unformattable_event_summary(client: AsyncClient):
+    """A summary template with stray braces (a literal JSON example not escaped)
+    would fail every event summary call at format time, so it is rejected up front."""
+    token = await login(client, "test@example.com", "devpassword123")
+
+    response = await client.post(
+        "/api/v1/chatgroups",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Summary Group", "prompts": {"event_summary": 'Shape: {"summary": "..."}\n{messages}'}},
+    )
+    assert response.status_code == 422
+
+
+async def test_chatgroup_prompts_default_and_legacy_event_key():
+    """Chatgroups stored before the streaming event pipeline keep their old `event`
+    prompt row: ChatGroupPrompts ignores unknown keys, so stored rows parse and pick
+    up the new event prompt defaults."""
+    prompts = ChatGroupPrompts.model_validate({"event": "Old block grouping prompt."})
+    assert "event" not in prompts.model_dump()
+
+    defaults = ChatGroupPrompts()
+    assert defaults.event_boundary
+    assert defaults.event_boundary_criteria == DEFAULT_EVENT_BOUNDARY_CRITERIA
+    assert set(DEFAULT_EVENT_BOUNDARY_CRITERIA) == {"extend", "new", "mixed"}
+    assert "{messages}" in defaults.event_summary
 
 
 async def test_update_chatgroup_custom_salience_prompt(client: AsyncClient):

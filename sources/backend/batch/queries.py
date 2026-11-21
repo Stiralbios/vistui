@@ -14,13 +14,13 @@ by their own stages, and the embedding and salience stages ignore the window: ev
 message is embedded and scored as soon as possible.
 """
 
-import datetime as dt
 import uuid
 from typing import Any, Protocol, TypeVar
 
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
 from backend.chatgroup.schemas import ChatGroupConfig
+from backend.event.models import EventDO, EventMessageLinkDO
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
 from sqlalchemy import Boolean, ColumnElement, and_, func, or_, select
@@ -149,28 +149,49 @@ class BatchQueries:
         return res.scalars().first()
 
     @staticmethod
-    async def get_contiguous_waiting_messages(
+    async def get_waiting_messages_with_state(
         session: AsyncSession,
-        chat_id: uuid.UUID,
         state_key: str,
-        min_created_at: dt.datetime,
-        block_size: int,
+        limit: int,
     ) -> list[MessageDO]:
-        """Return up to block_size messages in a chat waiting for the pipeline, starting
-        at or after a timestamp. Messages inside their chat's protected window are
-        excluded, so the block may be shorter than block_size."""
+        """Return up to `limit` oldest messages waiting for the given pipeline, skipping
+        protected messages — the plural form of get_single_message_with_state, for the
+        consolidation pipelines that process several messages per round."""
         stmt = (
             select(MessageDO)
             .join(ChatDO, ChatDO.id == MessageDO.chat_id)
             .join(ChatGroupDO, ChatGroupDO.id == ChatDO.chatgroup_id)
-            .where(MessageDO.chat_id == chat_id)
             .where(MessageDO.processing_state[state_key].astext == ProcessingStatus.WAITING)
-            .where(MessageDO.created_at >= min_created_at)
             .where(_is_outside_protected_window())
             .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
-            .limit(block_size)
+            .limit(limit)
         )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
 
+    @staticmethod
+    async def get_last_event(session: AsyncSession, chat_id: uuid.UUID) -> EventDO | None:
+        """Return the chat's most recent event (greatest end_at, id tiebreak): the
+        streaming event pipeline extends or concludes it for each new message."""
+        stmt = (
+            select(EventDO)
+            .where(EventDO.chat_id == chat_id)
+            .order_by(EventDO.end_at.desc(), EventDO.id.desc())
+            .limit(1)
+        )
+        res = await session.execute(stmt)
+        return res.scalars().first()
+
+    @staticmethod
+    async def get_event_messages(session: AsyncSession, event_id: uuid.UUID) -> list[MessageDO]:
+        """Return an event's member messages oldest-first: the event summary is rebuilt
+        from them, never from the previous summary."""
+        stmt = (
+            select(MessageDO)
+            .join(EventMessageLinkDO, EventMessageLinkDO.message_id == MessageDO.id)
+            .where(EventMessageLinkDO.event_id == event_id)
+            .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
+        )
         res = await session.execute(stmt)
         return list(res.scalars().all())
 

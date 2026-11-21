@@ -8,7 +8,7 @@ from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO
 from backend.fact.models import FactDO
 from backend.llm import Provider
-from backend.llm.provider import DecisionAnswer
+from backend.llm.provider import ChoiceQuestion, DecisionAnswer
 from backend.message.models import MessageDO
 from backend.topic.models import TopicDO
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -42,12 +42,13 @@ def _fake_chat_model():
         async def ainvoke(self, input: Any, config: Any = None, *, stop: Any = None, **kwargs: Any) -> Any:
             messages = input
             prompt = " ".join(getattr(m, "content", str(m)) for m in messages)
-            if "events" in prompt:
-                content = '{"events": [{"summary": "Demo event", "message_ids": []}]}'
-            elif "topics" in prompt:
+            lowered = prompt.lower()
+            if "topics" in lowered:
                 content = '{"actions": [{"action": "create", "summary": "Demo topic"}]}'
-            elif "facts" in prompt:
+            elif "facts" in lowered:
                 content = '{"actions": [{"action": "create", "summary": "Demo fact"}]}'
+            elif "event" in lowered:
+                content = '{"summary": "Demo event"}'
             else:
                 content = "{}"
             return SimpleNamespace(content=content)
@@ -69,7 +70,16 @@ async def clean_memory_tables():
 
 def _fake_decide():
     async def decide(self, state, questions, task=None, keep_alive=None):
-        return {name: DecisionAnswer(type="score", score=2.0) for name in questions}
+        answers = {}
+        for name, question in questions.items():
+            if isinstance(question, ChoiceQuestion):
+                # Every message extends the last event: the demo chat keeps few events.
+                probabilities = {key: 0.0 for key in question.criteria}
+                probabilities["extend"] = 1.0
+                answers[name] = DecisionAnswer(type="choice", choice="extend", probabilities=probabilities)
+            else:
+                answers[name] = DecisionAnswer(type="score", score=2.0)
+        return answers
 
     return decide
 

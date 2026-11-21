@@ -58,12 +58,13 @@ def _fake_chat_model():
         async def ainvoke(self, input: Any, config: Any = None, *, stop: Any = None, **kwargs: Any) -> Any:
             messages = input
             prompt = " ".join(getattr(m, "content", str(m)) for m in messages)
-            if "events" in prompt:
-                content = '{"events": [{"summary": "Demo event", "message_ids": []}]}'
-            elif "topics" in prompt:
+            lowered = prompt.lower()
+            if "topics" in lowered:
                 content = '{"actions": [{"action": "create", "summary": "Demo topic"}]}'
-            elif "facts" in prompt:
+            elif "facts" in lowered:
                 content = '{"actions": [{"action": "create", "summary": "Demo fact"}]}'
+            elif "event" in lowered:
+                content = '{"summary": "Demo event"}'
             else:
                 content = "{}"
             return SimpleNamespace(content=content)
@@ -89,15 +90,25 @@ def _fake_decide(
     async def decide(self, state, questions, task=None, keep_alive=None):
         if calls is not None:
             calls.append({"state": state, "questions": questions, "task": task})
-        if "memory_ratio" in questions:
-            if error:
-                raise DecisionError("decision model unavailable")
-            probabilities = None
-            if not omit_probabilities:
-                probabilities = ratio_probabilities or {"message": 0.4, "event": 0.1, "topic": 0.3, "fact": 0.2}
-            return {"memory_ratio": DecisionAnswer(type="choice", choice="message", probabilities=probabilities)}
-        score = 4.0 if "message" in state else 2.0
-        return {name: DecisionAnswer(type="score", score=score) for name in questions}
+        answers = {}
+        for name, question in questions.items():
+            if name == "memory_ratio":
+                if error:
+                    raise DecisionError("decision model unavailable")
+                probabilities = None
+                if not omit_probabilities:
+                    probabilities = ratio_probabilities or {"message": 0.4, "event": 0.1, "topic": 0.3, "fact": 0.2}
+                answers[name] = DecisionAnswer(type="choice", choice="message", probabilities=probabilities)
+            elif name == "boundary":
+                # Every message extends the last event: the seeded chat keeps a single
+                # event spanning all its messages.
+                probabilities = {key: 0.0 for key in question.criteria}
+                probabilities["extend"] = 1.0
+                answers[name] = DecisionAnswer(type="choice", choice="extend", probabilities=probabilities)
+            else:
+                score = 4.0 if "message" in state else 2.0
+                answers[name] = DecisionAnswer(type="score", score=score)
+        return answers
 
     return decide
 
@@ -267,8 +278,10 @@ def test_link_weight_is_logarithmic():
 async def test_search_endpoint_hybrid_ranking(client: AsyncClient):
     """Search must merge BM25 and vector candidates, then rank them with the chatgroup formula."""
     ids = await _seed_search_data()
-    # Round 1 embeds and scores the messages and creates a topic and a fact; round 2
-    # embeds and scores those memory objects.
+    # Round 1 embeds and scores the messages and creates the first topics and facts;
+    # round 2 embeds and scores those memory objects. Topic and fact stages process
+    # five messages per round, so after two rounds every message carries a topic and
+    # a fact link besides its event link.
     assert (await client.post("/admin/batch/trigger")).status_code == 200
     assert (await client.post("/admin/batch/trigger")).status_code == 200
 
@@ -300,30 +313,23 @@ async def test_search_endpoint_hybrid_ranking(client: AsyncClient):
     assert all(0.0 <= hit["vector_score"] <= 1.0 for hit in hits)
     assert max(hit["bm25_score"] for hit in message_hits) == pytest.approx(1.0)
 
-    # The two consolidated messages (event + topic + fact links) rank first: full score on
-    # both channels, full salience, and a higher link weight than the plain messages.
-    # All ten messages share one created_at, so which two got the topic/fact links is
-    # decided by id tie-breaking, but the counts and scores are deterministic.
+    # Every message carries all three links (event + topic + fact): full score on both
+    # channels, full salience, and the three-link weight. The plain-message case
+    # (linked_count 1) is gone — the consolidation stages covered all ten messages.
     linked_messages = [hit for hit in message_hits if hit["linked_count"] == 3]
-    assert len(linked_messages) == 2
+    assert len(linked_messages) == 10
     assert hits[0]["type"] == "message"
     assert all(hit["score"] == pytest.approx(link_weight(3)) for hit in linked_messages)
 
-    # Plain messages (one event link each, salience 1.0 from the fake decision call) follow.
-    plain_messages = [hit for hit in message_hits if hit["linked_count"] == 1]
-    assert len(plain_messages) == 8
-    assert all(hit["score"] == pytest.approx(link_weight(1)) for hit in plain_messages)
-
-    # Each event spans one block of contiguous waiting messages, and the ten seeded
-    # messages form a single block, so the event links all ten. The fake decision call
-    # scored it at 0.5 (mid rubric level), which halves its score below every plain
-    # message.
+    # The single event links all ten messages (the fake boundary decision extends it
+    # for every message). The fake decision call scored it at 0.5 (mid rubric level),
+    # which halves its score below every message.
     event_hit = next(hit for hit in hits if hit["type"] == "event")
     assert event_hit["linked_count"] == 10
     assert event_hit["salience"] == pytest.approx(0.5)
     assert event_hit["bm25_score"] == 0.0
     assert event_hit["score"] == pytest.approx(0.5 * link_weight(10))
-    assert event_hit["score"] < plain_messages[0]["score"]
+    assert event_hit["score"] < linked_messages[0]["score"]
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
@@ -498,12 +504,14 @@ async def test_search_packs_token_budget(client: AsyncClient):
     assert (await client.post("/admin/batch/trigger")).status_code == 200
 
     token = await login(client, "test@example.com", "devpassword123")
-    # A generous budget keeps every hit (13: ten messages, one event, one topic, one fact).
+    # A generous budget keeps every packed hit up to the default k: ten messages, one
+    # event, and one topic and one fact per message (the consolidation stages cover
+    # five messages per round, so two rounds link all ten).
     full = await _search(client, token, ids["chatgroup_id"], q="hiking")
     assert full["token_budget"] == 2000  # the chatgroup config default
     assert full["ratio_source"] == "config"
     assert full["memory_ratio"] == CONFIG_RATIO
-    assert len(full["hits"]) == 13
+    assert len(full["hits"]) == 20  # 31 candidates, capped by the default k=20
 
     # Budget 8 with the config ratio gives tiny shares (message 3.2, event 0.8,
     # topic 2.4, fact 1.6 tokens): the event and fact exceed their shares and the best

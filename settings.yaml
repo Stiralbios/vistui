@@ -53,7 +53,12 @@ overrides_models:
   memory_ratio:
     provider: "local-ollama"
     model: "d3:4b"
-  event:
+  # Decision task: the extend/new/mixed boundary question of the event pipeline.
+  event_boundary:
+    provider: "local-ollama"
+    model: "d3:4b"
+  # Generation task: summarize an event's full message list.
+  event_summary:
     provider: "gomodel"
     model: "strata_toaster/iq3_xxs"
   topic_candidate:

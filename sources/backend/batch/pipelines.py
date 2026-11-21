@@ -7,14 +7,19 @@ returns the number of messages handled, so the BatchWorker can call them repeate
 
 import datetime as dt
 import uuid
+from collections.abc import Awaitable, Callable
 
 from backend.batch.queries import BatchQueries
+from backend.batch.status import batch_status
 from backend.chat.models import ChatDO
+from backend.chatgroup.models import ChatGroupDO
+from backend.chatgroup.schemas import ChatGroupPrompts
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO, EventMessageLinkDO
 from backend.fact.models import FactDO, FactMessageLinkDO
 from backend.llm import Provider
-from backend.llm.prompts import EVENT_GROUPING, FACT_CANDIDATE, TOPIC_CANDIDATE
+from backend.llm.prompts import FACT_CANDIDATE, TOPIC_CANDIDATE
+from backend.llm.provider import ChoiceQuestion
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
 from backend.topic.models import TopicDO, TopicMessageLinkDO
@@ -22,6 +27,51 @@ from loguru import logger
 from paradedb.sqlalchemy.vector import cosine_distance
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def record_stage_failure(message_id: uuid.UUID, state_key: str) -> None:
+    """Record a consolidation failure on the message: bump retry_count and
+    last_failure_at in its own transaction. The stage flag stays waiting, so later
+    rounds retry the message for free."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        message = await session.get(MessageDO, message_id)
+        if message is None:
+            return
+        state = dict(message.processing_state)
+        state["retry_count"] = state.get("retry_count", 0) + 1
+        state["last_failure_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        message.processing_state = state
+    batch_status.recent_failures += 1
+    logger.warning(f"Stage {state_key} failed for message {message_id}")
+
+
+async def _process_waiting_messages(
+    provider: Provider,
+    state_key: str,
+    limit: int,
+    process_message: Callable[[Provider, uuid.UUID], Awaitable[bool]],
+) -> int:
+    """Run one consolidation stage over its waiting messages: fetch up to `limit`
+    oldest outside the protected window, then process each in its own transaction. A
+    message that fails keeps its waiting flag — later rounds retry it for free — with
+    the failure recorded on it, and the round continues. Returns the number of messages
+    handled."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        messages = await BatchQueries.get_waiting_messages_with_state(session, state_key, limit)
+    if not messages:
+        return 0
+
+    handled = 0
+    for message in messages:
+        try:
+            if await process_message(provider, message.id):
+                handled += 1
+        except Exception as exc:
+            logger.exception(f"Stage {state_key} failed on message {message.id}: {exc}")
+            await record_stage_failure(message.id, state_key)
+    if handled:
+        logger.info(f"Stage {state_key} processed {handled} message(s)")
+    return handled
 
 
 def _extract_actions(response: object, plural_key: str) -> list[dict]:
@@ -44,111 +94,211 @@ def _extract_actions(response: object, plural_key: str) -> list[dict]:
 
 
 class EventPipeline:
-    """Group contiguous messages of a chat into Events using the chat model.
+    """Build a chat's events message by message: each round takes the oldest waiting
+    messages and, for each, asks the decision model how it relates to the chat's last
+    event — extend it, open a new one, or both conclude the last and open the next (a
+    message can span the boundary). Event spans are fully flexible: the model decides
+    the boundaries, one message at a time.
 
-    Events are the coarsest memory unit: a block of consecutive messages summarized
-    together, with links back to each source message.
+    The touched event's summary is rebuilt from its full member message list, so an
+    extended event is never rewritten from its previous summary. Extending or
+    concluding an event rewrites its full_text: like topic/fact updates, the row is
+    invalidated (edited_at bumped, embedding and salience_score cleared) and re-enters
+    the memory embedding and salience queues.
     """
 
-    BLOCK_SIZE = 10
+    BOUNDARY_TASK = "event_boundary"
+    SUMMARY_TASK = "event_summary"
+    QUESTION = "boundary"
+    # Keep the decision model loaded between the per-message calls of a round.
+    KEEP_ALIVE = "10m"
 
     @classmethod
-    async def run_round(cls, provider: Provider | None = None, block_size: int | None = None) -> int:
-        """Process one block: take the oldest message waiting for the "event" stage
-        outside its chat's protected window and, in a single LLM call, group it with up to
-        `block_size` (default BLOCK_SIZE) contiguous non-protected messages of
-        the same chat into events. Returns the number of messages processed, 0 if
-        nothing to do."""
-        provider = provider or Provider()
-        block_size = block_size if block_size is not None else cls.BLOCK_SIZE
+    async def run_round(cls, provider: Provider | None = None, limit: int = 10) -> int:
+        """Process up to `limit` oldest messages waiting for the "event" stage outside
+        their protected window, one message per transaction. Returns the number of
+        messages handled (the shared runner records failures per message)."""
+        return await _process_waiting_messages(provider or Provider(), "event", limit, cls._process_message)
+
+    @classmethod
+    async def _process_message(cls, provider: Provider, message_id: uuid.UUID) -> bool:
+        """Process one waiting message in its own transaction: decide the boundary
+        against the chat's last event (a chat without events opens one directly), apply
+        the action, then flag the message done. Returns False when the message is no
+        longer waiting (nothing to do)."""
         async with get_async_sessionmaker()() as session, session.begin():
-            message = await BatchQueries.get_single_message_with_state(session, "event")
-            if message is None:
-                return 0
+            message = await session.get(MessageDO, message_id)
+            if message is None or message.processing_state.get("event") != ProcessingStatus.WAITING:
+                return False
 
-            block = await BatchQueries.get_contiguous_waiting_messages(
-                session,
-                message.chat_id,
-                "event",
-                message.created_at,
-                block_size,
-            )
-            if not block:
-                return 0
+            chatgroup = await cls._chatgroup(session, message.chat_id)
+            last_event = await BatchQueries.get_last_event(session, message.chat_id)
 
-            messages_prompt = cls._format_messages(block)
-            response = await provider.chat_json(
-                [
-                    {
-                        "role": "user",
-                        "content": EVENT_GROUPING.format(messages=messages_prompt),
-                    }
-                ],
-                task="event",
-            )
+            action = "new"
+            if last_event is not None:
+                action = await cls._decide_boundary(provider, chatgroup, last_event, message)
 
-            groups = response.get("events", [])
-            if not groups:
-                # LLM returned no grouping: fall back to one event covering the whole block.
-                groups = [{"summary": "General conversation block", "message_ids": [str(m.id) for m in block]}]
+            if action == "extend":
+                members = await BatchQueries.get_event_messages(session, last_event.id)
+                await cls._rewrite_event(session, provider, chatgroup, last_event, members + [message])
+                session.add(EventMessageLinkDO(event_id=last_event.id, message_id=message.id))
+            elif action == "new":
+                await cls._create_event(session, provider, chatgroup, [message])
+            elif action == "mixed":
+                members = await BatchQueries.get_event_messages(session, last_event.id)
+                await cls._rewrite_event(session, provider, chatgroup, last_event, members + [message])
+                session.add(EventMessageLinkDO(event_id=last_event.id, message_id=message.id))
+                await cls._create_event(session, provider, chatgroup, [message])
+            else:
+                raise ValueError(f"unknown event boundary action: {action}")
 
-            for group in groups:
-                summary = group.get("summary", "")
-                ids = {uuid.UUID(mid) for mid in group.get("message_ids", [])}
-                linked = [m for m in block if m.id in ids]
-                if not linked:
-                    linked = block
+            message.processing_state = {**message.processing_state, "event": ProcessingStatus.DONE}
+            return True
 
-                start_at = min(m.created_at for m in linked)
-                end_at = max(m.created_at for m in linked)
-                event = EventDO(
-                    chat_id=message.chat_id,
-                    full_text=summary,
-                    start_at=start_at,
-                    end_at=end_at,
-                )
-                session.add(event)
-                await session.flush()
-                for m in linked:
-                    session.add(EventMessageLinkDO(event_id=event.id, message_id=m.id))
+    @staticmethod
+    async def _chatgroup(session: AsyncSession, chat_id: uuid.UUID) -> ChatGroupDO:
+        """Load the chatgroup owning the chat (its prompts drive both calls)."""
+        chat = await session.get(ChatDO, chat_id)
+        assert chat is not None
+        chatgroup = await session.get(ChatGroupDO, chat.chatgroup_id)
+        assert chatgroup is not None
+        return chatgroup
 
-            for m in block:
-                m.processing_state = {**m.processing_state, "event": ProcessingStatus.DONE}
+    @classmethod
+    async def _decide_boundary(
+        cls,
+        provider: Provider,
+        chatgroup: ChatGroupDO,
+        last_event: EventDO,
+        message: MessageDO,
+    ) -> str:
+        """Ask the decision model how the message relates to the last event: a choice
+        question over the chatgroup's boundary criteria, resolved to the action with
+        the highest probability (a missing distribution is a failure, so the message
+        is retried)."""
+        question = ChoiceQuestion(
+            instructions=chatgroup.prompts.get("event_boundary") or ChatGroupPrompts().event_boundary,
+            criteria=chatgroup.prompts.get("event_boundary_criteria") or ChatGroupPrompts().event_boundary_criteria,
+        )
+        state = {
+            "chatgroup": chatgroup.description,
+            "last_event": {
+                "summary": last_event.full_text,
+                "start_at": last_event.start_at.isoformat(),
+                "end_at": last_event.end_at.isoformat(),
+            },
+            "message": {
+                "role": message.role,
+                "text": message.full_text,
+                "created_at": message.created_at.isoformat(),
+            },
+        }
+        answers = await provider.decide(
+            state,
+            {cls.QUESTION: question},
+            task=cls.BOUNDARY_TASK,
+            keep_alive=cls.KEEP_ALIVE,
+        )
+        probabilities = answers[cls.QUESTION].probabilities
+        if not probabilities:
+            raise ValueError(f"event boundary answer has no probabilities: {answers[cls.QUESTION]}")
+        return max(probabilities, key=lambda key: probabilities[key])
 
-            logger.info(f"Event pipeline processed {len(block)} messages")
-            return len(block)
+    @classmethod
+    async def _create_event(
+        cls,
+        session: AsyncSession,
+        provider: Provider,
+        chatgroup: ChatGroupDO,
+        members: list[MessageDO],
+    ) -> EventDO:
+        """Create a new event from its member messages: one summary call over the full
+        list, the time range derived from the members, each member linked."""
+        summary = await cls._summarize(provider, chatgroup, members)
+        event = EventDO(
+            chat_id=members[0].chat_id,
+            full_text=summary,
+            start_at=min(member.created_at for member in members),
+            end_at=max(member.created_at for member in members),
+        )
+        session.add(event)
+        await session.flush()
+        for member in members:
+            session.add(EventMessageLinkDO(event_id=event.id, message_id=member.id))
+        return event
+
+    @classmethod
+    async def _rewrite_event(
+        cls,
+        session: AsyncSession,
+        provider: Provider,
+        chatgroup: ChatGroupDO,
+        event: EventDO,
+        members: list[MessageDO],
+    ) -> None:
+        """Rewrite an existing event from its full member list: the summary is rebuilt
+        from the sources, the time range is re-derived, and the row is invalidated like
+        a topic/fact update (edited_at bumped, embedding and salience cleared, so it
+        re-enters the memory embedding and salience queues)."""
+        event.full_text = await cls._summarize(provider, chatgroup, members)
+        event.start_at = min(member.created_at for member in members)
+        event.end_at = max(member.created_at for member in members)
+        event.edited_at = dt.datetime.now(dt.timezone.utc)
+        event.embedding = None
+        event.salience_score = None
+
+    @staticmethod
+    async def _summarize(provider: Provider, chatgroup: ChatGroupDO, members: list[MessageDO]) -> str:
+        """Rebuild the event summary from the full member list through the chatgroup's
+        event_summary template ({messages} substituted). A response without a summary
+        is a failure, so the message is retried."""
+        template = chatgroup.prompts.get("event_summary") or ChatGroupPrompts().event_summary
+        response = await provider.chat_json(
+            [{"role": "user", "content": template.format(messages=EventPipeline._format_messages(members))}],
+            task=EventPipeline.SUMMARY_TASK,
+        )
+        summary = response.get("summary") if isinstance(response, dict) else None
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError(f"event summary response has no summary: {response}")
+        return summary.strip()
 
     @staticmethod
     def _format_messages(messages: list[MessageDO]) -> str:
-        """Render messages as a bullet list so the LLM can reference them by id."""
+        """Render messages as a bullet list, oldest first, so the summary follows the
+        conversation's order."""
         lines = []
-        for m in messages:
-            lines.append(f"- id: {m.id} | role: {m.role} | text: {m.full_text}")
+        for message in messages:
+            lines.append(f"- role: {message.role} | text: {message.full_text}")
         return "\n".join(lines)
 
 
 class TopicPipeline:
-    """Create or update the chatgroup's Topics based on a single waiting message.
+    """Create or update the chatgroup's Topics based on the waiting messages.
 
     For each message, the nearest existing topics (by embedding similarity) are offered
     to the LLM, which decides to create new topics or update/link existing ones.
     """
 
     @classmethod
-    async def run_round(cls, provider: Provider | None = None) -> int:
-        """Process the oldest message waiting for the "topic" stage outside its chat's
-        protected window: ask the LLM for create/update actions against the nearest topics,
-        then apply them. Returns 1 if a message was processed, else 0 (nothing waiting
-        or protected)."""
-        provider = provider or Provider()
+    async def run_round(cls, provider: Provider | None = None, limit: int = 5) -> int:
+        """Process up to `limit` oldest messages waiting for the "topic" stage outside
+        their protected window, one message per transaction. Returns the number of
+        messages handled (the shared runner records failures per message)."""
+        return await _process_waiting_messages(provider or Provider(), "topic", limit, cls._process_message)
+
+    @classmethod
+    async def _process_message(cls, provider: Provider, message_id: uuid.UUID) -> bool:
+        """Process one waiting message in its own transaction: ask the LLM for
+        create/update actions against the nearest topics, apply them, then flag the
+        message done. Returns False when the message is no longer waiting."""
         async with get_async_sessionmaker()() as session, session.begin():
-            message = await BatchQueries.get_single_message_with_state(session, "topic")
-            if message is None:
-                return 0
+            message = await session.get(MessageDO, message_id)
+            if message is None or message.processing_state.get("topic") != ProcessingStatus.WAITING:
+                return False
 
             chatgroup_id = await cls._chatgroup_id(session, message.chat_id)
             if chatgroup_id is None:
-                return 0
+                return False
 
             existing_topics = await cls._find_similar_topics(session, chatgroup_id, message.embedding, k=5)
             topics_text = "\n".join(f"- {topic.id}: {topic.full_text}" for topic in existing_topics) or "None"
@@ -172,8 +322,7 @@ class TopicPipeline:
                 await cls._apply_action(session, chatgroup_id, message, action, existing_topics)
 
             message.processing_state = {**message.processing_state, "topic": ProcessingStatus.DONE}
-            logger.info("Topic pipeline processed one message")
-            return 1
+            return True
 
     @staticmethod
     async def _chatgroup_id(session: AsyncSession, chat_id: uuid.UUID) -> uuid.UUID | None:
@@ -242,7 +391,7 @@ class TopicPipeline:
 
 
 class FactPipeline:
-    """Create or update the chatgroup's Facts based on a single waiting message.
+    """Create or update the chatgroup's Facts based on the waiting messages.
 
     For each message, the nearest existing facts (by embedding similarity) are offered
     to the LLM, which decides to create new facts or update/link existing ones.
@@ -256,20 +405,25 @@ class FactPipeline:
     """
 
     @classmethod
-    async def run_round(cls, provider: Provider | None = None) -> int:
-        """Process the oldest message waiting for the "fact" stage outside its chat's
-        protected window: ask the LLM for create/update actions against the nearest facts,
-        then apply them. Returns 1 if a message was processed, else 0 (nothing waiting,
-        not yet embedded, or protected)."""
-        provider = provider or Provider()
+    async def run_round(cls, provider: Provider | None = None, limit: int = 5) -> int:
+        """Process up to `limit` oldest messages waiting for the "fact" stage outside
+        their protected window, one message per transaction. Returns the number of
+        messages handled (the shared runner records failures per message)."""
+        return await _process_waiting_messages(provider or Provider(), "fact", limit, cls._process_message)
+
+    @classmethod
+    async def _process_message(cls, provider: Provider, message_id: uuid.UUID) -> bool:
+        """Process one waiting message in its own transaction: ask the LLM for
+        create/update actions against the nearest facts, apply them, then flag the
+        message done. Returns False when the message is no longer waiting."""
         async with get_async_sessionmaker()() as session, session.begin():
-            message = await BatchQueries.get_single_message_with_state(session, "fact")
-            if message is None:
-                return 0
+            message = await session.get(MessageDO, message_id)
+            if message is None or message.processing_state.get("fact") != ProcessingStatus.WAITING:
+                return False
 
             chatgroup_id = await cls._chatgroup_id(session, message.chat_id)
             if chatgroup_id is None:
-                return 0
+                return False
 
             existing_facts = await cls._find_similar_facts(session, chatgroup_id, message.embedding, k=5)
             facts_text = "\n".join(f"- {fact.id}: {fact.full_text}" for fact in existing_facts) or "None"
@@ -293,8 +447,7 @@ class FactPipeline:
                 await cls._apply_action(session, chatgroup_id, message, action, existing_facts)
 
             message.processing_state = {**message.processing_state, "fact": ProcessingStatus.DONE}
-            logger.info("Fact pipeline processed one message")
-            return 1
+            return True
 
     @staticmethod
     async def _chatgroup_id(session: AsyncSession, chat_id: uuid.UUID) -> uuid.UUID | None:

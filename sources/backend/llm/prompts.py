@@ -1,24 +1,6 @@
 # Default prompts used when a ChatGroup has no custom prompt stored.
 # All prompts expect JSON output.
 
-EVENT_GROUPING = """\
-You are grouping a contiguous block of chat messages into one or more events.
-For each event, write a short summary and list the message IDs that belong to it.
-A single message can belong to multiple events if it spans boundaries.
-
-Return strictly a JSON object with the shape:
-{{
-  "events": [
-    {{"summary": "...", "message_ids": ["msg-id-1", "msg-id-2"]}},
-    ...
-  ]
-}}
-
-Messages:
-{messages}
-"""
-
-
 TOPIC_CANDIDATE = """\
 You are updating topic summaries for a chat group.
 Given a new message and a list of existing topics, decide for each topic whether to update it,

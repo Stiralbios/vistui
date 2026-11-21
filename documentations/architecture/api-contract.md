@@ -156,8 +156,12 @@ Request:
   },
   "prompts": {
     "salience": "...",
+    "salience_rubric": ["...", "..."],
     "memory_ratio": "...",
-    "event": "...",
+    "memory_ratio_criteria": {"message": "...", "topic": "..."},
+    "event_boundary": "...",
+    "event_boundary_criteria": {"extend": "...", "new": "...", "mixed": "..."},
+    "event_summary": "...",
     "topic_candidate": "...",
     "topic_update": "...",
     "fact_candidate": "...",
@@ -167,7 +171,7 @@ Request:
 }
 ```
 
-Omitted `config`, `prompts`, and `ranking_formula` are filled from system defaults. `ranking_formula` must be a formula name defined in the settings file's `ranking_formulas` section (unknown names are rejected with `422`; formulas themselves are operator-authored settings entries, never accepted through the API).
+Omitted `config`, `prompts`, and `ranking_formula` are filled from system defaults. `ranking_formula` must be a formula name defined in the settings file's `ranking_formulas` section (unknown names are rejected with `422`; formulas themselves are operator-authored settings entries, never accepted through the API). Unknown prompt keys are ignored on write; `event_boundary_criteria` must hold only known criteria names (at least two of `extend`/`new`/`mixed`, else `422`) and `event_summary` must contain the `{messages}` placeholder (else `422`).
 
 Response: `201 Created`
 
@@ -508,6 +512,12 @@ Token estimates use a simple tokenizer heuristic; exactness is not critical beca
 
 ## Changelog
 
+- 2026-11-22 (issue 007, pre-1.0 API break): The chatgroup `prompts` key `event`
+  (block summary prompt) is replaced by `event_boundary` (instructions of the
+  per-message boundary decision), `event_boundary_criteria` (choice labels, validated
+  as a subset of `extend`/`new`/`mixed` with at least two entries, else `422`) and
+  `event_summary` (must contain the `{messages}` placeholder, else `422`). Unknown
+  prompt keys are ignored, so rows storing the legacy `event` key still parse.
 - 2026-11-21: Documented the search endpoint (it predates this changelog entry): the
   new `token_budget` query parameter (>= 1, config default 2000) packs the hits into
   per-type shares of the memory ratio — decision-model probabilities for ChatGroups

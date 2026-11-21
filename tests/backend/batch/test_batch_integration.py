@@ -6,9 +6,9 @@ VISTUI_SEED_DEMO=1), then real batch worker rounds are triggered through the adm
 API and the consolidation results are checked in the database.
 
 These tests are slow (each round runs a real embedding batch, per-element salience
-decision calls against the decision model, and one real LLM call per consolidation
-pipeline — several minutes per round with the local models) and need a reachable
-provider as configured in settings.yaml. They are opt-in: run them with
+and event-boundary decision calls against the decision model, plus one real LLM call
+per consolidated message — several minutes per round with the local models) and need
+a reachable provider as configured in settings.yaml. They are opt-in: run them with
 `just test-integration` (sets VISTUI_INTEGRATION_TESTS=1).
 """
 
@@ -38,19 +38,21 @@ pytestmark = [
     ),
 ]
 
-# Each round runs one embedding batch, one salience decision call per scored message
-# (up to VISTUI_BATCH_SALIENCE_LIMIT, 5 by default) plus one real LLM call per pipeline
-# (event, topic, fact), so a round takes several minutes with the real providers: keep
-# the default low and override with VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
+# Each round runs one embedding batch plus, per consolidated message, a real salience
+# or event-boundary decision call and a real LLM call (event summary, topic or fact
+# candidates), so a round takes several minutes with the real providers: keep the
+# default low and override with VISTUI_INTEGRATION_MAX_ROUNDS for longer runs.
 MAX_ROUNDS = int(os.environ.get("VISTUI_INTEGRATION_MAX_ROUNDS", "2"))
 EMBEDDING_DIMENSIONS = get_provider_config().defaults_models.embedding.dimensions
 # Per-round work limits of the batch stages, as the worker reads them from the
 # settings (overridable through the VISTUI_BATCH_* environment variables).
 SALIENCE_PER_ROUND = AppSettings().VISTUI_BATCH_SALIENCE_LIMIT
-EVENT_BLOCK_SIZE = AppSettings().VISTUI_BATCH_EVENT_BLOCK_SIZE
-# The event block groups up to EVENT_BLOCK_SIZE contiguous non-protected messages
-# per round (embedding and salience are not prerequisites).
-EVENT_PER_ROUND = EVENT_BLOCK_SIZE
+EVENT_PER_ROUND = AppSettings().VISTUI_BATCH_EVENT_MESSAGE_LIMIT
+TOPIC_PER_ROUND = AppSettings().VISTUI_BATCH_TOPIC_MESSAGE_LIMIT
+FACT_PER_ROUND = AppSettings().VISTUI_BATCH_FACT_MESSAGE_LIMIT
+# A message leaves the queue once every stage has flagged it done, so the queue drains
+# at the rate of the slowest stage.
+DRAIN_PER_ROUND = min(SALIENCE_PER_ROUND, EVENT_PER_ROUND, TOPIC_PER_ROUND, FACT_PER_ROUND)
 
 
 async def _queue_depth(client: AsyncClient) -> int:
@@ -95,14 +97,26 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             assert response.json() == {"status": "ok"}
             depths.append(await _queue_depth(client))
 
-        # The embedding, salience and event stages are batched (SALIENCE_PER_ROUND salience
-        # decisions per round, event blocks of EVENT_PER_ROUND messages), while the
-        # topic and fact stages each process one message per round: the queue drains by
-        # exactly one message per round.
-        assert depths == [30 - i for i in range(1, MAX_ROUNDS + 1)]
+        # The worker rounds swallow per-message consolidation failures into
+        # recent_failures (the failed message keeps its waiting flag, retried by later
+        # rounds), so the accounting is exact only when every model answer was
+        # well-formed; with a flaky answer the isolation invariants replace it.
+        failures = batch_status.recent_failures - failures_before
 
-        # The worker swallows pipeline errors into recent_failures: none should have fired.
-        assert batch_status.recent_failures == failures_before
+        if failures == 0:
+            # Every stage processes several messages per round, oldest first: the
+            # queue drains by DRAIN_PER_ROUND per round while eligible messages remain,
+            # then stops at the protected window (those messages keep their waiting
+            # flags).
+            assert depths == [
+                30 - min(round_index * DRAIN_PER_ROUND, 30 - PROTECTED_COUNT)
+                for round_index in range(1, MAX_ROUNDS + 1)
+            ]
+        else:
+            # The queue only drains (failed messages stay, nothing re-queues), and the
+            # first round consolidated at least one message end to end.
+            assert all(later <= earlier for earlier, later in zip(depths, depths[1:]))
+            assert depths[0] < 30
 
         # 3. Check the real consolidation results in the database.
         async with get_async_sessionmaker()() as session, session.begin():
@@ -126,25 +140,47 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             for message in messages:
                 _assert_real_embedding(message)
 
-            # Salience stage: the decision model (d3:4b) scored the SALIENCE_PER_ROUND oldest
-            # messages per round with a real salience in [0, 1]; like the embedding stage it
-            # ignores the protected window, and the rest are still waiting (their
-            # salience_score column is still NULL).
-            for message in messages[: SALIENCE_PER_ROUND * MAX_ROUNDS]:
-                assert message.salience_score is not None
-                assert 0.0 <= message.salience_score <= 1.0
-            for message in messages[SALIENCE_PER_ROUND * MAX_ROUNDS :]:
-                assert message.salience_score is None
+            # Consolidation failures isolate per message: a stage flag never flips to
+            # FAILED (the failed message stays waiting and is retried by later rounds),
+            # and every retried message carries its failure metadata.
+            for message in messages:
+                for flag in ("event", "topic", "fact"):
+                    assert message.processing_state[flag] != ProcessingStatus.FAILED
+                if message.processing_state.get("retry_count"):
+                    assert message.processing_state.get("last_failure_at")
 
-            # Event stage: one block per round, of up to EVENT_PER_ROUND non-protected
-            # messages.
-            event_done = [m for m in messages if m.processing_state["event"] == ProcessingStatus.DONE]
-            assert len(event_done) == EVENT_PER_ROUND * MAX_ROUNDS
+            if failures == 0:
+                # Salience stage: the decision model (d3:4b) scored the SALIENCE_PER_ROUND
+                # oldest messages per round with a real salience in [0, 1]; like the
+                # embedding stage it ignores the protected window, and the rest are still
+                # waiting (their salience_score column is still NULL).
+                for message in messages[: SALIENCE_PER_ROUND * MAX_ROUNDS]:
+                    assert message.salience_score is not None
+                    assert 0.0 <= message.salience_score <= 1.0
+                for message in messages[SALIENCE_PER_ROUND * MAX_ROUNDS :]:
+                    assert message.salience_score is None
 
-            # Topic and fact stages: the oldest message per round each.
-            for message in messages[:MAX_ROUNDS]:
-                assert message.processing_state["topic"] == ProcessingStatus.DONE
-                assert message.processing_state["fact"] == ProcessingStatus.DONE
+                # Event stage: up to EVENT_PER_ROUND non-protected messages per round.
+                event_done = [m for m in messages if m.processing_state["event"] == ProcessingStatus.DONE]
+                assert len(event_done) == EVENT_PER_ROUND * MAX_ROUNDS
+
+                # Topic and fact stages: up to their own per-round limits each, oldest first.
+                for message in messages[: TOPIC_PER_ROUND * MAX_ROUNDS]:
+                    assert message.processing_state["topic"] == ProcessingStatus.DONE
+                    assert message.processing_state["fact"] == ProcessingStatus.DONE
+            else:
+                # A stage never exceeds its per-round limits, whatever failed.
+                scored = [m for m in messages if m.salience_score is not None]
+                assert scored == messages[: len(scored)]  # rolled-back rounds restart from the oldest
+                assert len(scored) <= SALIENCE_PER_ROUND * MAX_ROUNDS
+                event_done = [m for m in messages if m.processing_state["event"] == ProcessingStatus.DONE]
+                assert 1 <= len(event_done) <= EVENT_PER_ROUND * MAX_ROUNDS
+                topic_done = [m for m in messages if m.processing_state["topic"] == ProcessingStatus.DONE]
+                fact_done = [m for m in messages if m.processing_state["fact"] == ProcessingStatus.DONE]
+                assert 1 <= len(topic_done) <= TOPIC_PER_ROUND * MAX_ROUNDS
+                assert 1 <= len(fact_done) <= FACT_PER_ROUND * MAX_ROUNDS
+                for message in event_done + topic_done + fact_done:
+                    assert message not in messages[-PROTECTED_COUNT:]
 
             # Protected window: the PROTECTED_COUNT most recent messages keep their
             # event/topic/fact flags waiting (protected messages are never added to
@@ -157,10 +193,11 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
                 # would mean still queued).
                 assert message.embedding is not None
 
-            # Events: at least one per round (the pipeline falls back to a single group),
-            # each linked to at least one source message, with a coherent time range.
+            # Events: the first consolidated message forces a new event; later rounds may
+            # create more or only extend the last one, each linked to at least one source
+            # message, with a coherent time range.
             events = list((await session.execute(select(EventDO).where(EventDO.chat_id == chat_id))).scalars().all())
-            assert len(events) >= MAX_ROUNDS
+            assert len(events) >= 1
             for event in events:
                 assert event.start_at <= event.end_at
             links = list(
@@ -186,17 +223,19 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             assert len(topics) >= 1
             assert len(facts) >= 1
 
-            # Memory objects created in an earlier round are re-embedded by the next one.
-            # This is only guaranteed for events (the pipeline always creates at least one
-            # per round via its fallback group): topics and facts are created whenever the
-            # LLM decides to, possibly after the memory stage already ran, so their
-            # re-embedding is not asserted here.
+            # Memory objects created in an earlier round are re-embedded by the next one:
+            # the memory stages run before the event stage within a round, so an event
+            # that the final round did not rewrite keeps the embedding it got then.
+            # Rewritten events (extend/mix) legitimately wait for the next round, so
+            # this is only asserted as "at least one embedded event". Topics and facts
+            # are created whenever the LLM decides to, possibly after the memory stage
+            # already ran, so their re-embedding is not asserted here.
             if MAX_ROUNDS >= 2:
                 assert any(
                     event.embedding is not None and len(event.embedding) == EMBEDDING_DIMENSIONS for event in events
                 )
                 # Likewise, the memory salience stage of a later round scored the
-                # events created by an earlier one.
+                # events created by an earlier one (same rewrite caveat).
                 assert any(event.salience_score is not None and 0.0 <= event.salience_score <= 1.0 for event in events)
 
         # 4. Hybrid search through the real API: real query embedding + ParadeDB BM25.

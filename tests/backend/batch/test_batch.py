@@ -13,15 +13,21 @@ from backend.batch.queries import BatchQueries
 from backend.batch.salience import SaliencePipeline, score_memory_objects
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import DEFAULT_SALIENCE_RUBRIC, ChatGroupConfig, ChatGroupPrompts
+from backend.chatgroup.schemas import (
+    DEFAULT_EVENT_BOUNDARY_CRITERIA,
+    DEFAULT_SALIENCE_RUBRIC,
+    ChatGroupConfig,
+    ChatGroupPrompts,
+)
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO, EventMessageLinkDO
 from backend.fact.models import FactDO, FactMessageLinkDO
 from backend.llm import Provider
-from backend.llm.provider import DecisionAnswer
+from backend.llm.provider import ChoiceQuestion, DecisionAnswer
 from backend.message.constants import MessageRole, ProcessingStatus
 from backend.message.models import MessageDO
 from backend.seeders import seed_demo_chat
+from backend.settings import AppSettings
 from backend.topic.models import TopicDO, TopicMessageLinkDO
 from backend.user.models import UserDO
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -48,8 +54,13 @@ def _fake_embeddings():
 
 def _fake_chat_model(
     topic_content: str = '{"actions": [{"action": "create", "summary": "Demo topic"}]}',
+    event_contents: list[str] | None = None,
+    calls: list[dict] | None = None,
 ):
-    """Return a LangChain ChatOpenAI whose ainvoke returns deterministic JSON."""
+    """Return a LangChain ChatOpenAI whose ainvoke returns deterministic JSON per
+    task, detected from the prompt content (topic and fact candidate prompts, event
+    summary prompt), optionally recording each call. Event answers are consumed from
+    `event_contents` in order, one per summary call."""
 
     class FakeChatModel(ChatOpenAI):
         def __init__(self, **kwargs):
@@ -61,28 +72,40 @@ def _fake_chat_model(
         async def ainvoke(self, input: Any, config: Any = None, *, stop: Any = None, **kwargs: Any) -> Any:
             messages = input
             prompt = " ".join(getattr(m, "content", str(m)) for m in messages)
-            if "events" in prompt:
-                content = '{"events": [{"summary": "Demo event", "message_ids": []}]}'
-            elif "topics" in prompt:
+            lowered = prompt.lower()
+            if "topics" in lowered:
                 content = topic_content
-            elif "facts" in prompt:
+            elif "facts" in lowered:
                 content = '{"actions": [{"action": "create", "summary": "Demo fact"}]}'
+            elif "event" in lowered:
+                content = (event_contents or ['{"summary": "Demo event summary"}']).pop(0)
             else:
                 content = "{}"
+            if calls is not None:
+                calls.append({"prompt": prompt, "content": content})
             return SimpleNamespace(content=content)
 
     return FakeChatModel
 
 
-def _fake_decide(score: float = 2.0, calls: list | None = None):
+def _fake_decide(score: float = 2.0, choice: str = "new", calls: list | None = None):
     """Return an async Provider.decide replacement that answers every question with
-    the same rubric score (default 2 of 4 levels -> salience 0.5) and optionally
-    records each call's arguments."""
+    the same rubric score (score questions, default 2 of 4 levels -> salience 0.5) or
+    the same action (choice questions: probability 1.0 on the action, 0.0 elsewhere),
+    optionally recording each call's arguments."""
 
     async def decide(self, state, questions, task=None, keep_alive=None):
         if calls is not None:
             calls.append({"state": state, "questions": questions, "task": task, "keep_alive": keep_alive})
-        return {name: DecisionAnswer(type="score", score=score) for name in questions}
+        answers = {}
+        for name, question in questions.items():
+            if isinstance(question, ChoiceQuestion):
+                probabilities = {key: 0.0 for key in question.criteria}
+                probabilities[choice] = 1.0
+                answers[name] = DecisionAnswer(type="choice", choice=choice, probabilities=probabilities)
+            else:
+                answers[name] = DecisionAnswer(type="score", score=score)
+        return answers
 
     return decide
 
@@ -171,6 +194,15 @@ async def _add_message(
     session.add(message)
     await session.flush()
     return message
+
+
+async def test_consolidation_round_limit_settings():
+    """The consolidation stages share the per-round message-limit pattern of the
+    batch stages: each round processes up to its limit of the oldest waiting messages."""
+    settings = AppSettings()
+    assert settings.VISTUI_BATCH_EVENT_MESSAGE_LIMIT == 10
+    assert settings.VISTUI_BATCH_TOPIC_MESSAGE_LIMIT == 5
+    assert settings.VISTUI_BATCH_FACT_MESSAGE_LIMIT == 5
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
@@ -434,34 +466,382 @@ async def test_embed_memory_objects():
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
-async def test_event_pipeline():
+async def test_event_pipeline_creates_first_event_without_decision():
+    """A chat without events opens one directly: no boundary decision call, the
+    summary built from the single message, the time range collapsed onto it, the
+    message linked and flagged done."""
+    decide_calls: list[dict] = []
+    chat_calls: list[dict] = []
     async with get_async_sessionmaker()() as session, session.begin():
         _, chat = await _make_test_chat(session)
-        messages = []
-        prev = None
-        for i in range(3):
-            msg = await _add_message(session, chat.id, f"Event message {i}", prev_id=prev)
-            messages.append(msg)
-            prev = msg.id
+        message = await _add_message(session, chat.id, "First event message")
 
-    processed = await EventPipeline.run_round()
-    assert processed == 3
+    with (
+        patch.object(Provider, "decide", _fake_decide(calls=decide_calls)),
+        patch("backend.llm.provider.ChatOpenAI", _fake_chat_model(calls=chat_calls)),
+    ):
+        assert await EventPipeline.run_round() == 1
+
+    assert decide_calls == []  # no last event: the boundary is forced
+    assert len(chat_calls) == 1
+    assert "First event message" in chat_calls[0]["prompt"]
 
     async with get_async_sessionmaker()() as session, session.begin():
         events = list((await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().all())
         assert len(events) == 1
-        assert events[0].full_text == "Demo event"
-        # Creating the event wrote its text: edited_at is set.
+        assert events[0].full_text == "Demo event summary"
+        assert events[0].start_at == message.created_at
+        assert events[0].end_at == message.created_at
         assert events[0].edited_at is not None
         links = list(
             (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == events[0].id)))
             .scalars()
             .all()
         )
-        assert len(links) == 3
-        for msg in messages:
-            updated = await session.get(MessageDO, msg.id)
+        assert [link.message_id for link in links] == [message.id]
+        updated = await session.get(MessageDO, message.id)
+        assert updated is not None
+        assert updated.processing_state["event"] == ProcessingStatus.DONE
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_pipeline_boundary_decision_payload():
+    """With a last event present, the boundary goes to the decision model: the
+    chatgroup's event_boundary instructions and criteria reach the choice question
+    verbatim, the task and keep-alive are the boundary ones, and the state carries the
+    chatgroup description, the last event and the message."""
+    decide_calls: list[dict] = []
+    async with get_async_sessionmaker()() as session, session.begin():
+        chatgroup, chat = await _make_test_chat(
+            session,
+            prompts={
+                "event_boundary": "Relate the message to the last event.",
+                "event_boundary_criteria": {"extend": "Continues.", "new": "Starts.", "mixed": "Spans."},
+            },
+        )
+        first = await _add_message(session, chat.id, "First event message")
+        second = await _add_message(session, chat.id, "Second event message", prev_id=first.id)
+
+    with patch.object(Provider, "decide", _fake_decide(choice="new", calls=decide_calls)):
+        assert await EventPipeline.run_round() == 2  # forced new, then decided new
+
+    assert len(decide_calls) == 1  # only the second message needed a boundary decision
+    call = decide_calls[0]
+    assert call["task"] == "event_boundary"
+    assert call["keep_alive"] == "10m"
+    question = call["questions"]["boundary"]
+    assert isinstance(question, ChoiceQuestion)
+    assert question.instructions == "Relate the message to the last event."
+    assert question.criteria == {"extend": "Continues.", "new": "Starts.", "mixed": "Spans."}
+    assert call["state"]["chatgroup"] == chatgroup.description
+    assert call["state"]["last_event"]["summary"] == "Demo event summary"
+    assert call["state"]["last_event"]["start_at"] == first.created_at.isoformat()
+    assert call["state"]["last_event"]["end_at"] == first.created_at.isoformat()
+    assert call["state"]["message"] == {
+        "role": second.role,
+        "text": second.full_text,
+        "created_at": second.created_at.isoformat(),
+    }
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_pipeline_new_action_leaves_last_event():
+    """Decision "new": the last event is left exactly as it was (no rewrite, no
+    invalidation, no new link), and a fresh event is created from the message alone."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        first = await _add_message(session, chat.id, "First event message")
+
+    with patch.object(Provider, "decide", _fake_decide(choice="new")):
+        assert await EventPipeline.run_round() == 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        second = await _add_message(
+            session,
+            chat.id,
+            "Second event message",
+            prev_id=first.id,
+            created_at=first.created_at + dt.timedelta(minutes=5),
+        )
+        event = (await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().one()
+        event.embedding = [0.0] * 768
+        event.salience_score = 0.5
+
+    with patch.object(Provider, "decide", _fake_decide(choice="new")):
+        assert await EventPipeline.run_round() == 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        events = list(
+            (await session.execute(select(EventDO).where(EventDO.chat_id == chat.id).order_by(EventDO.start_at.asc())))
+            .scalars()
+            .all()
+        )
+        assert len(events) == 2
+        first_event, second_event = events
+        assert first_event.full_text == "Demo event summary"  # untouched
+        assert first_event.embedding == [0.0] * 768
+        assert first_event.salience_score == 0.5
+        assert second_event.start_at == second.created_at
+        assert second_event.end_at == second.created_at
+        first_links = list(
+            (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == first_event.id)))
+            .scalars()
+            .all()
+        )
+        second_links = list(
+            (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == second_event.id)))
+            .scalars()
+            .all()
+        )
+        assert [link.message_id for link in first_links] == [first.id]
+        assert [link.message_id for link in second_links] == [second.id]
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_pipeline_extend_action_rewrites_from_members():
+    """Decision "extend": the event's summary is rebuilt from all its member messages
+    plus the new one, the time range grows to cover it, and the row is invalidated like
+    a topic/fact update (edited_at bumped, embedding and salience cleared for the
+    memory queues) with the new message linked."""
+    chat_calls: list[dict] = []
+    old_edited_at = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session, prompts={"event_summary": "Event so far:\n{messages}"})
+        first = await _add_message(session, chat.id, "Hiking plan message")
+
+    with patch.object(Provider, "decide", _fake_decide(choice="new")):
+        assert await EventPipeline.run_round() == 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        second = await _add_message(
+            session,
+            chat.id,
+            "Trail choice message",
+            prev_id=first.id,
+            created_at=first.created_at + dt.timedelta(minutes=5),
+        )
+        event = (await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().one()
+        event.embedding = [0.0] * 768
+        event.salience_score = 0.5
+        event.edited_at = old_edited_at
+
+    with (
+        patch.object(Provider, "decide", _fake_decide(choice="extend")),
+        patch(
+            "backend.llm.provider.ChatOpenAI",
+            _fake_chat_model(event_contents=['{"summary": "Extended summary"}'], calls=chat_calls),
+        ),
+    ):
+        assert await EventPipeline.run_round() == 1
+
+    assert len(chat_calls) == 1
+    assert chat_calls[0]["prompt"].startswith("Event so far:")
+    assert "Hiking plan message" in chat_calls[0]["prompt"]  # rebuilt from all member texts
+    assert "Trail choice message" in chat_calls[0]["prompt"]
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        events = list((await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().all())
+        assert len(events) == 1
+        assert events[0].full_text == "Extended summary"
+        assert events[0].end_at == second.created_at
+        assert events[0].edited_at > old_edited_at
+        assert events[0].embedding is None  # requeued for the memory stages
+        assert events[0].salience_score is None
+        links = list(
+            (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == events[0].id)))
+            .scalars()
+            .all()
+        )
+        assert {link.message_id for link in links} == {first.id, second.id}
+        updated = await session.get(MessageDO, second.id)
+        assert updated is not None
+        assert updated.processing_state["event"] == ProcessingStatus.DONE
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_pipeline_mixed_action_spans_boundary():
+    """Decision "mixed": the boundary message concludes the last event and opens the
+    next — both events are re-summarized with it among their sources, and it is linked
+    to both."""
+    chat_calls: list[dict] = []
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        first = await _add_message(session, chat.id, "Hiking plan message")
+
+    with patch.object(Provider, "decide", _fake_decide(choice="new")):
+        assert await EventPipeline.run_round() == 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        second = await _add_message(
+            session,
+            chat.id,
+            "Trail choice message",
+            prev_id=first.id,
+            created_at=first.created_at + dt.timedelta(minutes=5),
+        )
+
+    with (
+        patch.object(Provider, "decide", _fake_decide(choice="mixed")),
+        patch(
+            "backend.llm.provider.ChatOpenAI",
+            _fake_chat_model(
+                event_contents=['{"summary": "Close summary"}', '{"summary": "Open summary"}'],
+                calls=chat_calls,
+            ),
+        ),
+    ):
+        assert await EventPipeline.run_round() == 1
+
+    assert len(chat_calls) == 2
+    assert "Hiking plan message" in chat_calls[0]["prompt"]
+    assert "Trail choice message" in chat_calls[0]["prompt"]  # the close includes the boundary message
+    assert "Trail choice message" in chat_calls[1]["prompt"]
+    assert "Hiking plan message" not in chat_calls[1]["prompt"]
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        events = list(
+            (await session.execute(select(EventDO).where(EventDO.chat_id == chat.id).order_by(EventDO.start_at.asc())))
+            .scalars()
+            .all()
+        )
+        assert len(events) == 2
+        first_event, second_event = events
+        assert first_event.full_text == "Close summary"
+        assert first_event.end_at == second.created_at
+        assert first_event.embedding is None  # the rewrite requeues the row
+        assert first_event.salience_score is None
+        assert second_event.full_text == "Open summary"
+        assert second_event.start_at == second.created_at
+        assert second_event.end_at == second.created_at
+        first_links = list(
+            (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == first_event.id)))
+            .scalars()
+            .all()
+        )
+        second_links = list(
+            (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == second_event.id)))
+            .scalars()
+            .all()
+        )
+        assert {link.message_id for link in first_links} == {first.id, second.id}  # linked to both
+        assert [link.message_id for link in second_links] == [second.id]
+        updated = await session.get(MessageDO, second.id)
+        assert updated is not None
+        assert updated.processing_state["event"] == ProcessingStatus.DONE
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_pipeline_respects_limit():
+    """Up to `limit` messages are processed per round, oldest first; the boundary
+    question offers the default criteria when the chatgroup keeps them."""
+    decide_calls: list[dict] = []
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        for i in range(12):
+            await _add_message(session, chat.id, f"Event message {i}")
+
+    with patch.object(Provider, "decide", _fake_decide(choice="new", calls=decide_calls)):
+        assert await EventPipeline.run_round(limit=10) == 10
+        assert await EventPipeline.run_round(limit=10) == 2
+
+    assert len(decide_calls) == 11  # the first message is a forced new, not a decision
+    assert decide_calls[0]["questions"]["boundary"].criteria == DEFAULT_EVENT_BOUNDARY_CRITERIA
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        events = list((await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().all())
+        assert len(events) == 12  # one event per decided-new message
+
+
+async def test_event_pipeline_failure_isolated_per_message():
+    """A message whose boundary decision fails keeps its waiting flag — later rounds
+    retry it for free — with the failure recorded on it (retry_count, last_failure_at),
+    and the round continues with the remaining messages."""
+    inner = _fake_decide(choice="new")
+
+    async def decide(self, state, questions, task=None, keep_alive=None):
+        if state["message"]["text"] == "Fails once":
+            raise RuntimeError("decision model down")
+        return await inner(self, state, questions, task=task, keep_alive=keep_alive)
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        ok_first = await _add_message(session, chat.id, "Ok one")
+        failing = await _add_message(session, chat.id, "Fails once", prev_id=ok_first.id)
+        ok_second = await _add_message(session, chat.id, "Ok two", prev_id=failing.id)
+
+    failures_before = batch_status.recent_failures
+    with (
+        patch("backend.llm.provider.OpenAIEmbeddings", _fake_embeddings()),
+        patch("backend.llm.provider.ChatOpenAI", _fake_chat_model()),
+        patch.object(Provider, "decide", decide),
+    ):
+        assert await EventPipeline.run_round() == 2  # ok_first and ok_second; the failure is skipped
+    assert batch_status.recent_failures == failures_before + 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        for message in (ok_first, ok_second):
+            updated = await session.get(MessageDO, message.id)
+            assert updated is not None
             assert updated.processing_state["event"] == ProcessingStatus.DONE
+        failed = await session.get(MessageDO, failing.id)
+        assert failed is not None
+        assert failed.processing_state["event"] == ProcessingStatus.WAITING  # retried later
+        assert failed.processing_state["retry_count"] == 1
+        assert failed.processing_state["last_failure_at"] is not None
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_boundary_answer_without_probabilities_fails():
+    """A choice answer without a probability distribution cannot be resolved: the
+    message keeps its waiting flag with the failure recorded on it, and the last
+    event is left untouched."""
+
+    async def decide(self, state, questions, task=None, keep_alive=None):
+        return {name: DecisionAnswer(type="choice", choice="new") for name in questions}
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        first = await _add_message(session, chat.id, "First event message")
+
+    assert await EventPipeline.run_round() == 1  # first message: forced new (fixture decide)
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        second = await _add_message(session, chat.id, "Second event message", prev_id=first.id)
+
+    with patch.object(Provider, "decide", decide):
+        assert await EventPipeline.run_round() == 0
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        updated = await session.get(MessageDO, second.id)
+        assert updated is not None
+        assert updated.processing_state["event"] == ProcessingStatus.WAITING
+        assert updated.processing_state["retry_count"] == 1
+        assert updated.processing_state["last_failure_at"] is not None
+        events = list((await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().all())
+        assert len(events) == 1  # the garbage answer opened nothing
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_summary_response_without_summary_fails():
+    """A summary response without a summary key cannot be applied: the message keeps
+    its waiting flag with the failure recorded on it, and no event is created."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        message = await _add_message(session, chat.id, "First event message")
+
+    with patch(
+        "backend.llm.provider.ChatOpenAI",
+        _fake_chat_model(event_contents=["{}"]),
+    ):
+        assert await EventPipeline.run_round() == 0
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        updated = await session.get(MessageDO, message.id)
+        assert updated is not None
+        assert updated.processing_state["event"] == ProcessingStatus.WAITING
+        assert updated.processing_state["retry_count"] == 1
+        events = list((await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().all())
+        assert events == []
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
@@ -584,6 +964,117 @@ async def test_fact_pipeline():
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
+async def test_topic_pipeline_respects_limit():
+    """Up to `limit` messages are processed per round, oldest first."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        for i in range(7):
+            await _add_message(session, chat.id, f"Topic limit message {i}")
+
+    assert await TopicPipeline.run_round(limit=5) == 5
+    assert await TopicPipeline.run_round(limit=5) == 2
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        topics = list(
+            (await session.execute(select(TopicDO).where(TopicDO.chatgroup_id == chat.chatgroup_id))).scalars().all()
+        )
+        assert len(topics) == 7  # the fake model creates one topic per message
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_fact_pipeline_respects_limit():
+    """Up to `limit` messages are processed per round, oldest first."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        for i in range(7):
+            await _add_message(session, chat.id, f"Fact limit message {i}")
+
+    assert await FactPipeline.run_round(limit=5) == 5
+    assert await FactPipeline.run_round(limit=5) == 2
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        facts = list(
+            (await session.execute(select(FactDO).where(FactDO.chatgroup_id == chat.chatgroup_id))).scalars().all()
+        )
+        assert len(facts) == 7  # the fake model creates one fact per message
+
+
+def _unparseable_json_model(fail_text: str):
+    """Return a chat model whose answer is unparseable JSON for prompts mentioning
+    `fail_text`, a valid action otherwise."""
+
+    class UnparseableModel(ChatOpenAI):
+        def __init__(self, **kwargs):
+            pass
+
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, input: Any, config: Any = None, *, stop: Any = None, **kwargs: Any) -> Any:
+            prompt = " ".join(getattr(m, "content", str(m)) for m in input)
+            content = "not json" if fail_text in prompt else '{"actions": [{"action": "create", "summary": "Ok"}]}'
+            return SimpleNamespace(content=content)
+
+    return UnparseableModel
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_topic_pipeline_failure_isolated_per_message():
+    """A message whose candidate call fails keeps its waiting flag — later rounds retry
+    it for free — with the failure recorded on it, and the round continues with the
+    remaining messages."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        ok_first = await _add_message(session, chat.id, "Topic ok one")
+        failing = await _add_message(session, chat.id, "Topic fails once", prev_id=ok_first.id)
+        ok_second = await _add_message(session, chat.id, "Topic ok two", prev_id=failing.id)
+
+    failures_before = batch_status.recent_failures
+    with patch("backend.llm.provider.ChatOpenAI", _unparseable_json_model("Topic fails once")):
+        assert await TopicPipeline.run_round() == 2  # ok_first and ok_second; the failure is skipped
+    assert batch_status.recent_failures == failures_before + 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        for message in (ok_first, ok_second):
+            updated = await session.get(MessageDO, message.id)
+            assert updated is not None
+            assert updated.processing_state["topic"] == ProcessingStatus.DONE
+        failed = await session.get(MessageDO, failing.id)
+        assert failed is not None
+        assert failed.processing_state["topic"] == ProcessingStatus.WAITING  # retried later
+        assert failed.processing_state["retry_count"] == 1
+        assert failed.processing_state["last_failure_at"] is not None
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_fact_pipeline_failure_isolated_per_message():
+    """A message whose candidate call fails keeps its waiting flag — later rounds retry
+    it for free — with the failure recorded on it, and the round continues with the
+    remaining messages."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        ok_first = await _add_message(session, chat.id, "Fact ok one")
+        failing = await _add_message(session, chat.id, "Fact fails once", prev_id=ok_first.id)
+        ok_second = await _add_message(session, chat.id, "Fact ok two", prev_id=failing.id)
+
+    failures_before = batch_status.recent_failures
+    with patch("backend.llm.provider.ChatOpenAI", _unparseable_json_model("Fact fails once")):
+        assert await FactPipeline.run_round() == 2  # ok_first and ok_second; the failure is skipped
+    assert batch_status.recent_failures == failures_before + 1
+
+    async with get_async_sessionmaker()() as session, session.begin():
+        for message in (ok_first, ok_second):
+            updated = await session.get(MessageDO, message.id)
+            assert updated is not None
+            assert updated.processing_state["fact"] == ProcessingStatus.DONE
+        failed = await session.get(MessageDO, failing.id)
+        assert failed is not None
+        assert failed.processing_state["fact"] == ProcessingStatus.WAITING  # retried later
+        assert failed.processing_state["retry_count"] == 1
+        assert failed.processing_state["last_failure_at"] is not None
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
 async def test_protected_window_skips_recent_messages():
     """The `protected_message_count` most recent messages are never added to
     facts/events/topics (consolidation skips them until newer messages push them out of
@@ -606,13 +1097,14 @@ async def test_protected_window_skips_recent_messages():
     # Embedding ignores the protected window: all 12 messages are embedded.
     assert await embed_messages() == 12
 
-    # The event block only reaches the 7 messages outside the window.
+    # The event stage processes the 7 messages outside the window (its per-round limit
+    # is 10), the topic and fact stages the 5 oldest of them (limit 5).
     assert await EventPipeline.run_round() == 7
     assert await EventPipeline.run_round() == 0  # remaining candidates are all protected
 
-    # Topic/fact stages process the oldest non-protected message, one per round.
-    assert await TopicPipeline.run_round() == 1
-    assert await FactPipeline.run_round() == 1
+    # Topic/fact stages process up to five oldest non-protected messages per round.
+    assert await TopicPipeline.run_round() == 5
+    assert await FactPipeline.run_round() == 5
 
     async with get_async_sessionmaker()() as session, session.begin():
         first = await session.get(MessageDO, messages[0].id)
