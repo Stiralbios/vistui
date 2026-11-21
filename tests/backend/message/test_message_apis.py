@@ -1,7 +1,22 @@
 import uuid
 
 from backend.auth.schemas import Token
+from backend.database import get_async_sessionmaker
+from backend.message.models import MessageDO
 from httpx import AsyncClient
+
+_DONE_STATE = {"event": "done", "topic": "done", "fact": "done", "last_failure_at": None, "retry_count": 0}
+
+
+async def _seed_derived_data(message_id: str) -> None:
+    """Give a message its full set of derived data: an embedding, a salience score and
+    every consolidation flag done."""
+    async with get_async_sessionmaker()() as session, session.begin():
+        row = await session.get(MessageDO, uuid.UUID(message_id))
+        assert row is not None
+        row.embedding = [0.0] * 768
+        row.salience_score = 0.5
+        row.processing_state = dict(_DONE_STATE)
 
 
 async def login(client: AsyncClient, email: str, password: str) -> str:
@@ -69,6 +84,8 @@ async def test_create_message(client: AsyncClient):
     assert data["role"] == "user"
     assert data["chat_id"] == chat["id"]
     assert data["prev_message_id"] is None
+    # Creation writes the text, so edited_at starts at the creation time.
+    assert data["edited_at"] == data["created_at"]
 
 
 async def test_create_message_links_to_last(client: AsyncClient):
@@ -87,11 +104,15 @@ async def test_create_message_links_to_last(client: AsyncClient):
     assert data["prev_message_id"] == first["id"]
 
 
-async def test_update_message(client: AsyncClient):
+async def test_update_message_text_change_requeues_derived_data(client: AsyncClient):
+    """Replacing the text records the write in edited_at and requeues every derived
+    artifact: the NULL columns requeue the embedding and salience stages, the flags
+    requeue consolidation, so the message is rebuilt from scratch by the batch worker."""
     token = await login(client, "test@example.com", "devpassword123")
     chatgroup = await _create_chatgroup(client, token)
     chat = await _create_chat(client, token, chatgroup_id=chatgroup["id"])
     message = await _create_message(client, token, chat_id=chat["id"], full_text="Original text")
+    await _seed_derived_data(message["id"])
 
     response = await client.patch(
         f"/api/v1/chats/{chat['id']}/messages/{message['id']}",
@@ -102,6 +123,80 @@ async def test_update_message(client: AsyncClient):
     data = response.json()
     assert data["full_text"] == "Updated text"
     assert data["prev_message_id"] == message["prev_message_id"]
+    assert data["edited_at"] is not None
+    assert data["edited_at"] != data["created_at"]  # rewritten after creation
+
+    async with get_async_sessionmaker()() as session:
+        row = await session.get(MessageDO, uuid.UUID(message["id"]))
+        assert row is not None
+        assert row.edited_at is not None
+        assert row.embedding is None
+        assert row.salience_score is None
+        assert row.processing_state["event"] == "waiting"
+        assert row.processing_state["topic"] == "waiting"
+        assert row.processing_state["fact"] == "waiting"
+
+
+async def test_update_message_role_only_keeps_derived_data(client: AsyncClient):
+    """A role-only change relabels the message without touching the content: edited_at
+    keeps its creation value, and the derived data (scored with the old role) is kept
+    as is."""
+    token = await login(client, "test@example.com", "devpassword123")
+    chatgroup = await _create_chatgroup(client, token)
+    chat = await _create_chat(client, token, chatgroup_id=chatgroup["id"])
+    message = await _create_message(client, token, chat_id=chat["id"], full_text="Original text")
+    await _seed_derived_data(message["id"])
+
+    response = await client.patch(
+        f"/api/v1/chats/{chat['id']}/messages/{message['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"role": "assistant"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["role"] == "assistant"
+    assert data["full_text"] == "Original text"
+    # The text was not rewritten: edited_at keeps its creation value.
+    assert data["edited_at"] == data["created_at"]
+
+    async with get_async_sessionmaker()() as session:
+        row = await session.get(MessageDO, uuid.UUID(message["id"]))
+        assert row is not None
+        assert row.edited_at == row.created_at
+        assert row.embedding is not None
+        assert row.salience_score == 0.5
+        assert row.processing_state["event"] == "done"
+        assert row.processing_state["topic"] == "done"
+        assert row.processing_state["fact"] == "done"
+
+
+async def test_update_message_identical_text_bumps_edited_at_without_requeue(client: AsyncClient):
+    """Patching the same text still rewrites the field, so edited_at is bumped — but
+    the content is unchanged, so nothing derived is requeued."""
+    token = await login(client, "test@example.com", "devpassword123")
+    chatgroup = await _create_chatgroup(client, token)
+    chat = await _create_chat(client, token, chatgroup_id=chatgroup["id"])
+    message = await _create_message(client, token, chat_id=chat["id"], full_text="Original text")
+    await _seed_derived_data(message["id"])
+
+    response = await client.patch(
+        f"/api/v1/chats/{chat['id']}/messages/{message['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"full_text": "Original text"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["edited_at"] is not None
+    assert data["edited_at"] != data["created_at"]  # the field was rewritten
+
+    async with get_async_sessionmaker()() as session:
+        row = await session.get(MessageDO, uuid.UUID(message["id"]))
+        assert row is not None
+        assert row.edited_at != row.created_at
+        # Identical content: the derived data still matches the text.
+        assert row.embedding is not None
+        assert row.salience_score == 0.5
+        assert row.processing_state["event"] == "done"
 
 
 async def test_retrieve_message(client: AsyncClient):

@@ -133,7 +133,7 @@ lambda vector_score, bm25_score, salience, linked_count: max(
 |----------|---------|
 | `vector_score` | Vector similarity normalized to 0..1. |
 | `bm25_score` | BM25 relevance normalized to 0..1 against the best hit of the query. |
-| `salience` | Candidate's stored `salience_score` in [0, 1]. Rows without one (not scored yet, or a chatgroup with `use_salience` false/null) get the neutral 1.0. |
+| `salience` | Candidate's stored `salience_score` in [0, 1]. Rows without one (not scored yet, or a chatgroup with `use_salience` false) get the neutral 1.0. |
 | `linked_count` | Number of messages linked to the candidate (events, topics, facts) or 1 for raw messages. |
 
 ### Formula evaluation

@@ -2,7 +2,7 @@ import itertools
 import uuid
 
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import DEFAULT_RANKING_FORMULA, ChatGroupRead
+from backend.chatgroup.schemas import DEFAULT_RANKING_FORMULA, ChatGroupConfig, ChatGroupPrompts, ChatGroupRead
 from polyfactory import Use
 
 from tests.backend.config import BaseFactory
@@ -25,29 +25,8 @@ class ChatGroupFactory(BaseFactory[ChatGroupDO]):
     id = Use(uuid.uuid4)
     name = Use(_next_name)
     description = Use(_next_description)
-    config = {
-        "token_budget": 2000,
-        "memory_ratio": {"message": 0.40, "event": 0.10, "topic": 0.30, "fact": 0.20},
-        "use_llm_memory_ratio": False,
-        "use_salience": True,
-        "protected_message_count": 10,
-        "topic_update_threshold": 0.75,
-        "fact_update_threshold": 0.80,
-        "fact_history_count": 5,
-        "max_facts_per_message": 5,
-        "max_topics_per_message": 5,
-        "batch_inactivity_seconds": 3600,
-        "processing_timeout_seconds": 3600,
-    }
-    prompts = {
-        "salience": "Assign a salience score between 0 and 1 to the message.",
-        "memory_ratio": "Determine the desired memory category distribution.",
-        "event": "Summarize a contiguous block of messages into one or more events.",
-        "topic_candidate": "Select existing topics to update or decide to create a new topic.",
-        "topic_update": "Update a specific topic given the message and ChatGroup context.",
-        "fact_candidate": "Select existing facts to update or decide to create a new fact.",
-        "fact_update": "Update a specific fact given the message and its recent history.",
-    }
+    config = ChatGroupConfig().model_dump()
+    prompts = ChatGroupPrompts().model_dump()
     ranking_formula = DEFAULT_RANKING_FORMULA
 
     @classmethod

@@ -19,6 +19,9 @@ class EventDO(Base):
     end_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     salience_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # When the text was last written: set at creation (default now()), bumped by every
+    # later full_text write.
+    edited_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
 

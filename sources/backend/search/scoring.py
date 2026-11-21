@@ -13,7 +13,7 @@ Formulas are evaluated with plain `eval` in a namespace restricted to a few math
 This is deliberately NOT a security boundary: any chatgroup owner can store a formula, and
 restricted namespaces are bypassable without builtins (`().__class__.__base__.__subclasses__()`),
 so a hostile formula means arbitrary code execution on the backend. Accepted for now because
-the deployment is local and single-user; tracked as issue 001 in `plan/issue.md`.
+the deployment is local and single-user.
 """
 
 import math
@@ -83,8 +83,8 @@ def evaluate_ranking_formula(
 
     The channel arguments must already be normalized (see `clamp_unit` and
     `normalize_bm25`); `linked_count` is the raw link count, formulas decide how to weigh
-    it, typically through `link_weight`. See the module docstring and `plan/issue.md` for
-    the security caveat of evaluating user-authored formulas.
+    it, typically through `link_weight`. See the module docstring for the security
+    caveat of evaluating user-authored formulas.
     """
     compiled = _COMPILED.get(formula)
     if compiled is None:

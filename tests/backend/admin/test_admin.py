@@ -3,12 +3,12 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from backend.batch.queries import BatchQueries
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO
 from backend.fact.models import FactDO
 from backend.llm import Provider
 from backend.llm.provider import DecisionAnswer
-from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
 from backend.topic.models import TopicDO
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -111,8 +111,9 @@ async def test_batch_trigger_endpoint(client):
 
 @pytest.mark.usefixtures("fake_langchain_client")
 async def test_reembed_endpoint(client):
-    """After consolidation, reembed must null every vector and requeue the embedding
-    stage so the worker recomputes everything with the (new) embedding model."""
+    """After consolidation, reembed must null every vector — a NULL embedding is the
+    requeue marker, so the worker recomputes everything with the (new) embedding model
+    on the next rounds."""
     await client.post("/admin/seed/demo")
     assert (await client.post("/admin/batch/trigger")).status_code == 200
 
@@ -129,7 +130,9 @@ async def test_reembed_endpoint(client):
         assert len(messages) == 30
         for message in messages:
             assert message.embedding is None
-            assert message.processing_state["embedding"] == ProcessingStatus.WAITING
         for model in (EventDO, TopicDO, FactDO):
             objects = list((await session.execute(select(model))).scalars().all())
             assert all(obj.embedding is None for obj in objects)
+
+        # The queue depth is derived from the same NULL condition: everything is backlogged.
+        assert await BatchQueries.count_waiting_messages(session) >= 30

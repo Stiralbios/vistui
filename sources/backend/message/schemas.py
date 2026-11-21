@@ -7,9 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def default_processing_state() -> dict:
+    # The embedding and salience stages are queued by the columns themselves:
+    # embedding IS NULL -> waiting for embedding; embedding present + salience_score NULL
+    # -> waiting for salience. Only the consolidation flags live here.
     return {
-        "embedding": ProcessingStatus.WAITING,
-        "salience": ProcessingStatus.WAITING,
         "event": ProcessingStatus.WAITING,
         "topic": ProcessingStatus.WAITING,
         "fact": ProcessingStatus.WAITING,
@@ -32,6 +33,7 @@ class MessageRead(MessageBase):
     salience_score: float | None
     processing_state: dict
     created_at: dt.datetime
+    edited_at: dt.datetime
     updated_at: dt.datetime | None
 
 

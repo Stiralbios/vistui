@@ -1,3 +1,4 @@
+import datetime as dt
 import uuid
 
 from backend.database import with_async_session
@@ -41,7 +42,11 @@ class TopicStore:
         if orm_object is None:
             raise TopicNotFoundProblem(f"Topic {topic.id} not found")
 
-        for field, value in topic.model_dump(exclude_unset=True, exclude={"context"}).items():
+        payload = topic.model_dump(exclude_unset=True, exclude={"context"})
+        if "full_text" in payload:
+            # The text field was rewritten: record the write.
+            payload["edited_at"] = dt.datetime.now(dt.timezone.utc)
+        for field, value in payload.items():
             setattr(orm_object, field, value)
         await session.flush()
         await session.refresh(orm_object)

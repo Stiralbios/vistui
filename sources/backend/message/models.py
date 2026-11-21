@@ -21,6 +21,10 @@ class MessageDO(Base):
     salience_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     processing_state: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # When the text was last written: set at creation (default now()), bumped by every
+    # later full_text write. Batch stages never rewrite content, so it survives
+    # embedding/salience/consolidation rounds untouched.
+    edited_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
 

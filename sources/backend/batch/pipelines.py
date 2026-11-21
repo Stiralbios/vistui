@@ -56,14 +56,14 @@ class EventPipeline:
     async def run_round(cls, provider: Provider | None = None, block_size: int | None = None) -> int:
         """Process one block: take the oldest message waiting for the "event" stage
         outside its chat's protected window and, in a single LLM call, group it with up to
-        `block_size` (default BLOCK_SIZE) contiguous embedded, non-protected messages of
+        `block_size` (default BLOCK_SIZE) contiguous non-protected messages of
         the same chat into events. Returns the number of messages processed, 0 if
         nothing to do."""
         provider = provider or Provider()
         block_size = block_size if block_size is not None else cls.BLOCK_SIZE
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "event")
-            if message is None or message.embedding is None:
+            if message is None:
                 return 0
 
             block = await BatchQueries.get_contiguous_waiting_messages(
@@ -138,12 +138,12 @@ class TopicPipeline:
     async def run_round(cls, provider: Provider | None = None) -> int:
         """Process the oldest message waiting for the "topic" stage outside its chat's
         protected window: ask the LLM for create/update actions against the nearest topics,
-        then apply them. Returns 1 if a message was processed, else 0 (nothing waiting,
-        not yet embedded, or protected)."""
+        then apply them. Returns 1 if a message was processed, else 0 (nothing waiting
+        or protected)."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "topic")
-            if message is None or message.embedding is None:
+            if message is None:
                 return 0
 
             chatgroup_id = await cls._chatgroup_id(session, message.chat_id)
@@ -185,10 +185,14 @@ class TopicPipeline:
     async def _find_similar_topics(
         session: AsyncSession,
         chatgroup_id: uuid.UUID,
-        embedding: list[float],
+        embedding: list[float] | None,
         k: int,
     ) -> list[TopicDO]:
-        """Return the chatgroup's k topics closest (cosine) to the message embedding."""
+        """Return the chatgroup's k topics closest (cosine) to the message embedding,
+        or none when the message is not embedded yet (the LLM then has no candidates
+        to update)."""
+        if embedding is None:
+            return []
         stmt = (
             select(TopicDO)
             .where(TopicDO.chatgroup_id == chatgroup_id)
@@ -218,7 +222,6 @@ class TopicPipeline:
                 chatgroup_id=chatgroup_id,
                 full_text=action.get("summary", message.full_text),
                 start_at=message.created_at,
-                last_edited_at=now,
             )
             session.add(topic)
             await session.flush()
@@ -232,7 +235,7 @@ class TopicPipeline:
                 topic = next((t for t in existing_topics if str(t.id) == topic_id), None)
             if topic is not None:
                 topic.full_text = action.get("summary", topic.full_text)
-                topic.last_edited_at = now
+                topic.edited_at = now
                 topic.embedding = None
                 topic.salience_score = None
                 session.add(TopicMessageLinkDO(topic_id=topic.id, message_id=message.id))
@@ -261,7 +264,7 @@ class FactPipeline:
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
             message = await BatchQueries.get_single_message_with_state(session, "fact")
-            if message is None or message.embedding is None:
+            if message is None:
                 return 0
 
             chatgroup_id = await cls._chatgroup_id(session, message.chat_id)
@@ -303,10 +306,14 @@ class FactPipeline:
     async def _find_similar_facts(
         session: AsyncSession,
         chatgroup_id: uuid.UUID,
-        embedding: list[float],
+        embedding: list[float] | None,
         k: int,
     ) -> list[FactDO]:
-        """Return the chatgroup's k facts closest (cosine) to the message embedding."""
+        """Return the chatgroup's k facts closest (cosine) to the message embedding,
+        or none when the message is not embedded yet (the LLM then has no candidates
+        to update)."""
+        if embedding is None:
+            return []
         stmt = (
             select(FactDO)
             .where(FactDO.chatgroup_id == chatgroup_id)
@@ -336,7 +343,6 @@ class FactPipeline:
                 chatgroup_id=chatgroup_id,
                 full_text=action.get("summary", message.full_text),
                 start_at=message.created_at,
-                last_edited_at=now,
             )
             session.add(fact)
             await session.flush()
@@ -350,7 +356,7 @@ class FactPipeline:
                 fact = next((f for f in existing_facts if str(f.id) == fact_id), None)
             if fact is not None:
                 fact.full_text = action.get("summary", fact.full_text)
-                fact.last_edited_at = now
+                fact.edited_at = now
                 fact.embedding = None
                 fact.salience_score = None
                 session.add(FactMessageLinkDO(fact_id=fact.id, message_id=message.id))

@@ -20,6 +20,7 @@ class EventRead(EventBase):
     salience_score: float | None
     messages_linked_count: int = 0
     created_at: dt.datetime
+    edited_at: dt.datetime
     updated_at: dt.datetime | None
 
     @model_validator(mode="before")

@@ -1,10 +1,16 @@
+import datetime as dt
 import uuid
 
 from backend.database import with_async_session
 from backend.exceptions import MessageNotFoundProblem
 from backend.message.constants import MessageRole
 from backend.message.models import MessageDO
-from backend.message.schemas import MessageCreateInternal, MessageInternal, MessageUpdateInternal
+from backend.message.schemas import (
+    MessageCreateInternal,
+    MessageInternal,
+    MessageUpdateInternal,
+    default_processing_state,
+)
 from pydantic import UUID4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,17 +39,21 @@ class MessageStore:
         if orm_object is None:
             raise MessageNotFoundProblem(f"Message {message.id} not found")
 
-        for field, value in message.model_dump(exclude_unset=True, exclude={"context", "id", "chat_id"}).items():
+        payload = message.model_dump(exclude_unset=True, exclude={"context", "id", "chat_id"})
+        text_written = "full_text" in payload
+        text_changed = text_written and payload["full_text"] != orm_object.full_text
+        for field, value in payload.items():
             setattr(orm_object, field, value)
-        orm_object.processing_state = {
-            "embedding": "waiting",
-            "salience": "waiting",
-            "event": "waiting",
-            "topic": "waiting",
-            "fact": "waiting",
-            "last_failure_at": None,
-            "retry_count": 0,
-        }
+        if text_written:
+            # The text field was rewritten: record the write.
+            orm_object.edited_at = dt.datetime.now(dt.timezone.utc)
+        if text_changed:
+            # The content really changed: requeue everything derived from the text —
+            # the NULL columns requeue the embedding and salience stages, the flags
+            # requeue consolidation.
+            orm_object.embedding = None
+            orm_object.salience_score = None
+            orm_object.processing_state = default_processing_state()
         await session.flush()
         await session.refresh(orm_object)
         return MessageInternal.model_validate(orm_object)

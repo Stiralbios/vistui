@@ -48,9 +48,9 @@ EMBEDDING_DIMENSIONS = get_provider_config().defaults.embedding.dimensions
 # settings (overridable through the VISTUI_BATCH_* environment variables).
 SALIENCE_PER_ROUND = AppSettings().VISTUI_BATCH_SALIENCE_LIMIT
 EVENT_BLOCK_SIZE = AppSettings().VISTUI_BATCH_EVENT_BLOCK_SIZE
-# The event block only groups messages that are already salience-done, so the salience
-# limit caps the event block too.
-EVENT_PER_ROUND = min(SALIENCE_PER_ROUND, EVENT_BLOCK_SIZE)
+# The event block groups up to EVENT_BLOCK_SIZE contiguous non-protected messages
+# per round (embedding and salience are not prerequisites).
+EVENT_PER_ROUND = EVENT_BLOCK_SIZE
 
 
 async def _queue_depth(client: AsyncClient) -> int:
@@ -96,7 +96,7 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             depths.append(await _queue_depth(client))
 
         # The embedding, salience and event stages are batched (SALIENCE_PER_ROUND salience
-        # decisions per round, event blocks capped by the salience-done gate), while the
+        # decisions per round, event blocks of EVENT_PER_ROUND messages), while the
         # topic and fact stages each process one message per round: the queue drains by
         # exactly one message per round.
         assert depths == [30 - i for i in range(1, MAX_ROUNDS + 1)]
@@ -125,20 +125,19 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             # Embedding stage: all 30 messages embedded in the first round (limit 32 >= 30).
             for message in messages:
                 _assert_real_embedding(message)
-                assert message.processing_state["embedding"] == ProcessingStatus.DONE
 
             # Salience stage: the decision model (d3:4b) scored the SALIENCE_PER_ROUND oldest
             # messages per round with a real salience in [0, 1]; like the embedding stage it
-            # ignores the protected window, and the rest are still waiting.
+            # ignores the protected window, and the rest are still waiting (their
+            # salience_score column is still NULL).
             for message in messages[: SALIENCE_PER_ROUND * MAX_ROUNDS]:
-                assert message.processing_state["salience"] == ProcessingStatus.DONE
                 assert message.salience_score is not None
                 assert 0.0 <= message.salience_score <= 1.0
             for message in messages[SALIENCE_PER_ROUND * MAX_ROUNDS :]:
-                assert message.processing_state["salience"] == ProcessingStatus.WAITING
                 assert message.salience_score is None
 
-            # Event stage: one block per round, capped by the salience-done gate.
+            # Event stage: one block per round, of up to EVENT_PER_ROUND non-protected
+            # messages.
             event_done = [m for m in messages if m.processing_state["event"] == ProcessingStatus.DONE]
             assert len(event_done) == EVENT_PER_ROUND * MAX_ROUNDS
 
@@ -154,8 +153,9 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
                 assert message.processing_state["event"] == ProcessingStatus.WAITING
                 assert message.processing_state["topic"] == ProcessingStatus.WAITING
                 assert message.processing_state["fact"] == ProcessingStatus.WAITING
-                # ...but the embedding stage ignores the window.
-                assert message.processing_state["embedding"] == ProcessingStatus.DONE
+                # ...but the embedding stage ignores the window (a NULL embedding
+                # would mean still queued).
+                assert message.embedding is not None
 
             # Events: at least one per round (the pipeline falls back to a single group),
             # each linked to at least one source message, with a coherent time range.

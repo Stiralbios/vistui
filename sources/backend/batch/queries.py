@@ -1,12 +1,17 @@
 """Reusable DB queries for the batch worker.
 
-They center on MessageDO.processing_state, a JSONB dict mapping each pipeline stage
-("embedding", "event", "topic", "fact") to a ProcessingStatus value.
+The embedding and salience stages are driven by the message columns themselves,
+exactly like the memory-object stages: `embedding IS NULL` marks a message waiting for
+the embedding stage, and `salience_score IS NULL` marks one waiting for the salience
+stage. A failed round rolls back, the column stays NULL, and the next round retries
+for free. The `processing_state` JSONB only carries the consolidation flags ("event",
+"topic", "fact") plus the retry metadata (`retry_count`, `last_failure_at`).
 
 Consolidation queries (event/topic/fact) only select messages outside their chat's
 protected window — the `protected_message_count` most recent messages, configured on
-the chat's chatgroup. The embedding stage ignores the window: every message is
-embedded as soon as possible.
+the chat's chatgroup. Embedding and salience are not prerequisites: they are computed
+by their own stages, and the embedding and salience stages ignore the window: every
+message is embedded and scored as soon as possible.
 """
 
 import datetime as dt
@@ -18,7 +23,7 @@ from backend.chatgroup.models import ChatGroupDO
 from backend.chatgroup.schemas import ChatGroupConfig
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import Boolean, ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -35,9 +40,6 @@ class _HasSalience(Protocol):
 
 T = TypeVar("T", bound=_HasEmbedding)
 S = TypeVar("S", bound=_HasSalience)
-
-# Fallback when a chatgroup's config predates the key: follows the deployment's
-# VISTUI_PROTECTED_MESSAGE_COUNT setting, like the ChatGroupConfig default.
 
 
 def _is_outside_protected_window() -> ColumnElement[bool]:
@@ -78,23 +80,48 @@ def _is_outside_protected_window() -> ColumnElement[bool]:
     return newer_count >= protected_count
 
 
+def _use_salience_optin() -> ColumnElement[bool]:
+    """Build a SQL predicate keeping only messages of chatgroups opted into salience
+    scoring: the `use_salience` config key is a plain boolean, missing meaning the
+    default true."""
+    return func.coalesce(ChatGroupDO.config["use_salience"].astext.cast(Boolean), True)
+
+
 class BatchQueries:
     """Database queries used by the batch consolidation worker."""
 
     @staticmethod
-    async def get_messages_with_state(
+    async def get_messages_without_embedding(
         session: AsyncSession,
-        state_key: str,
         limit: int,
     ) -> list[MessageDO]:
-        """Return the oldest messages whose processing_state[state_key] is waiting.
-
-        The protected window is ignored: the embedding stage uses this and must process
-        every message, recent or not.
-        """
+        """Return the oldest messages whose embedding column is NULL (the embedding
+        stage's queue marker). The protected window is ignored: every message is
+        embedded, recent or not."""
         stmt = (
             select(MessageDO)
-            .where(MessageDO.processing_state[state_key].astext == ProcessingStatus.WAITING)
+            .where(MessageDO.embedding.is_(None))
+            .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
+            .limit(limit)
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def get_messages_waiting_for_salience(
+        session: AsyncSession,
+        limit: int,
+    ) -> list[MessageDO]:
+        """Return the oldest messages whose salience_score column is NULL (the salience
+        stage's queue marker), restricted to chatgroups opted into salience scoring —
+        opted-out chatgroups keep the NULL score by design, so without the SQL filter
+        they would clog the queue forever."""
+        stmt = (
+            select(MessageDO)
+            .join(ChatDO, ChatDO.id == MessageDO.chat_id)
+            .join(ChatGroupDO, ChatGroupDO.id == ChatDO.chatgroup_id)
+            .where(MessageDO.salience_score.is_(None))
+            .where(_use_salience_optin())
             .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
             .limit(limit)
         )
@@ -108,16 +135,12 @@ class BatchQueries:
     ) -> MessageDO | None:
         """Return the oldest single message waiting for the given pipeline, skipping
         messages inside their chat's protected window: protected messages are never
-        added to facts, events or topics.
-
-        Consolidation eligibility also requires `salience = done`: the salience stage
-        runs earlier in the same worker round, so a message is scored before it is
-        consolidated (and a salience failure pauses consolidation of that message).
-        """
+        added to facts, events or topics."""
         stmt = (
             select(MessageDO)
+            .join(ChatDO, ChatDO.id == MessageDO.chat_id)
+            .join(ChatGroupDO, ChatGroupDO.id == ChatDO.chatgroup_id)
             .where(MessageDO.processing_state[state_key].astext == ProcessingStatus.WAITING)
-            .where(MessageDO.processing_state["salience"].astext == ProcessingStatus.DONE)
             .where(_is_outside_protected_window())
             .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
             .limit(1)
@@ -135,14 +158,13 @@ class BatchQueries:
     ) -> list[MessageDO]:
         """Return up to block_size messages in a chat waiting for the pipeline, starting
         at or after a timestamp. Messages inside their chat's protected window are
-        excluded, so the block may be shorter than block_size. Like the anchor query,
-        consolidation requires `salience = done`."""
+        excluded, so the block may be shorter than block_size."""
         stmt = (
             select(MessageDO)
+            .join(ChatDO, ChatDO.id == MessageDO.chat_id)
+            .join(ChatGroupDO, ChatGroupDO.id == ChatDO.chatgroup_id)
             .where(MessageDO.chat_id == chat_id)
             .where(MessageDO.processing_state[state_key].astext == ProcessingStatus.WAITING)
-            .where(MessageDO.processing_state["salience"].astext == ProcessingStatus.DONE)
-            .where(MessageDO.embedding.isnot(None))
             .where(MessageDO.created_at >= min_created_at)
             .where(_is_outside_protected_window())
             .order_by(MessageDO.created_at.asc(), MessageDO.id.asc())
@@ -176,7 +198,13 @@ class BatchQueries:
 
     @staticmethod
     async def count_waiting_messages(session: AsyncSession) -> int:
-        """Count messages that still have at least one waiting pipeline flag.
+        """Count messages that still have work left, derived from the same conditions
+        the stages select on:
+
+        - `embedding IS NULL` -> waiting for the embedding stage (all chatgroups);
+        - `salience_score IS NULL` -> waiting for the salience stage, unless the
+          chatgroup opted out (the score stays NULL by design);
+        - a `waiting` event/topic/fact flag.
 
         Messages inside the protected window are included: they stay counted until
         their chat grows enough to make them eligible for consolidation.
@@ -184,10 +212,15 @@ class BatchQueries:
         stmt = (
             select(func.count())
             .select_from(MessageDO)
+            .join(ChatDO, ChatDO.id == MessageDO.chat_id)
+            .join(ChatGroupDO, ChatGroupDO.id == ChatDO.chatgroup_id)
             .where(
                 or_(
-                    MessageDO.processing_state["embedding"].astext == ProcessingStatus.WAITING,
-                    MessageDO.processing_state["salience"].astext == ProcessingStatus.WAITING,
+                    MessageDO.embedding.is_(None),
+                    and_(
+                        MessageDO.salience_score.is_(None),
+                        _use_salience_optin(),
+                    ),
                     MessageDO.processing_state["event"].astext == ProcessingStatus.WAITING,
                     MessageDO.processing_state["topic"].astext == ProcessingStatus.WAITING,
                     MessageDO.processing_state["fact"].astext == ProcessingStatus.WAITING,

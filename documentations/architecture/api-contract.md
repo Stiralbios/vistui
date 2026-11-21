@@ -303,7 +303,11 @@ Rules:
 - The embedding is recomputed.
 - Memory ratio is determined per retrieval request, either by LLM (if `use_llm_memory_ratio` is enabled) or from the ChatGroup `memory_ratio` config.
 - Retrieval is performed only if `retrieve=true`.
-- Batch processing state is reset to `waiting` for embedding/salience on every save, and for event/topic/fact only if the message is outside the protected window.
+- Every message write that carries `full_text` bumps `edited_at` — the field records when
+  the text was last written and is set at creation too. When the new text actually
+  differs from the stored one, the embedding and salience fields are cleared and the
+  event/topic/fact flags are reset to `waiting`. A role-only change, or a PATCH carrying
+  identical text, updates nothing derived.
 
 Response: `200 OK` (or `201 Created` on first creation)
 
@@ -317,13 +321,14 @@ Response: `200 OK` (or `201 Created` on first creation)
   "role": "user",
   "salience_score": 0.82,
   "processing_state": {
-    "embedding": "waiting",
-    "salience": "waiting",
     "event": "waiting",
     "topic": "waiting",
-    "fact": "waiting"
+    "fact": "waiting",
+    "last_failure_at": null,
+    "retry_count": 0
   },
   "created_at": "2026-07-11T12:00:00Z",
+  "edited_at": "2026-07-11T12:05:00Z",
   "updated_at": "2026-07-11T12:00:01Z",
   "memory": {
     "token_budget": 2000,
@@ -444,5 +449,13 @@ Token estimates use a simple tokenizer heuristic; exactness is not critical beca
 
 ## Changelog
 
+- 2026-11-21: Messages gained `edited_at` (set only when `full_text` actually changes; a text change requeues every derived artifact, other edits touch nothing derived). Topics and facts renamed `last_edited_at` to `edited_at` (pre-1.0 API break).
+- 2026-11-21 (corrections, pre-1.0 API break): `edited_at` on messages, events, topics
+  and facts records when the text was last written: set at creation (never null), bumped
+  by every later `full_text` write, identical-text PATCHes included. Topic and fact
+  create/update payloads no longer accept an `edited_at` field — it is server-managed
+  (events expose it in responses). `use_salience` is a plain boolean: JSON null is
+  rejected. Message PATCH requeue semantics: only a text that actually differs from the
+  stored one requeues the derived artifacts.
 - 2026-07-11: Initial API contract derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: frontend terminology, removed memory_ratio from ChatGroup config, removed dedicated memory retrieval endpoint, split fact prompts into `fact_candidate` and `fact_update`, added embedding/salience processing state.

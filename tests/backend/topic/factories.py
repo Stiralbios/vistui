@@ -26,7 +26,7 @@ class TopicFactory(BaseFactory[TopicDO]):
     id = Use(uuid.uuid4)
     full_text = Use(_next_summary)
     start_at = Use(_now)
-    last_edited_at = Use(_now)
+    edited_at = Use(_now)
     salience_score = 0.7
 
     @classmethod

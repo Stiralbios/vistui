@@ -134,8 +134,6 @@ async def _seed_search_data() -> dict:
                     full_text=text,
                     role="user",
                     processing_state={
-                        "embedding": ProcessingStatus.WAITING,
-                        "salience": ProcessingStatus.WAITING,
                         "event": ProcessingStatus.WAITING,
                         "topic": ProcessingStatus.WAITING,
                         "fact": ProcessingStatus.WAITING,
@@ -159,7 +157,7 @@ def test_default_ranking_formula_is_a_pydantic_default():
 def test_evaluate_ranking_formula():
     """The default formula takes the max of the (normalized) channels, weighted by salience
     and by the logarithmic link weight."""
-    # An unlinked item is not disqualified any more: it keeps half weight.
+    # An unlinked item keeps half weight instead of being disqualified.
     assert evaluate_ranking_formula(DEFAULT_RANKING_FORMULA, 0.8, 0.4, 1.0, 0) == pytest.approx(0.4)
     # 100 links saturate the weight to 1.0.
     assert evaluate_ranking_formula(DEFAULT_RANKING_FORMULA, 0.2, 0.9, 1.0, LINK_WEIGHT_REFERENCE) == pytest.approx(0.9)
@@ -267,15 +265,15 @@ async def test_search_endpoint_hybrid_ranking(client: AsyncClient):
     assert len(plain_messages) == 8
     assert all(hit["score"] == pytest.approx(link_weight(1)) for hit in plain_messages)
 
-    # Each event spans one block: with the salience gate the block is capped at
-    # VISTUI_BATCH_SALIENCE_LIMIT (5) messages per round, so the first event spans the 5
-    # oldest messages. The fake decision call scored it at 0.5 (mid rubric level), which
-    # halves its score below every plain message.
+    # Each event spans one block of contiguous waiting messages, and the ten seeded
+    # messages form a single block, so the event links all ten. The fake decision call
+    # scored it at 0.5 (mid rubric level), which halves its score below every plain
+    # message.
     event_hit = next(hit for hit in hits if hit["type"] == "event")
-    assert event_hit["linked_count"] == 5
+    assert event_hit["linked_count"] == 10
     assert event_hit["salience"] == pytest.approx(0.5)
     assert event_hit["bm25_score"] == 0.0
-    assert event_hit["score"] == pytest.approx(0.5 * link_weight(5))
+    assert event_hit["score"] == pytest.approx(0.5 * link_weight(10))
     assert event_hit["score"] < plain_messages[0]["score"]
 
 
@@ -342,9 +340,8 @@ async def test_search_endpoint_survives_query_syntax(client: AsyncClient):
 async def test_create_chatgroup_accepts_custom_ranking_formula(client: AsyncClient):
     """A chatgroup owner can store their own formula; it is only evaluated by search.
 
-    NOTE: formulas are evaluated with `eval` (see `plan/issue.md`, issue 001): a hostile
-    formula is not rejected on write. Do not open chatgroups to untrusted users until
-    that issue is fixed.
+    NOTE: formulas are evaluated with `eval` and a hostile formula is not rejected on
+    write. Do not open chatgroups to untrusted users.
     """
     token = await login(client, "test@example.com", "devpassword123")
     response = await client.post(

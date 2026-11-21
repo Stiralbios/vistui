@@ -5,26 +5,22 @@ from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO
 from backend.fact.models import FactDO
 from backend.llm import Provider
-from backend.message.constants import ProcessingStatus
 from backend.topic.models import TopicDO
 from loguru import logger
 
 
 async def embed_messages(limit: int = 32, provider: Provider | None = None) -> int:
-    """Compute embeddings for messages with processing_state.embedding == waiting."""
+    """Compute embeddings for messages whose embedding column is NULL (the stage's
+    queue marker — a failed round rolls back and the next round retries for free)."""
     provider = provider or Provider()
     async with get_async_sessionmaker()() as session, session.begin():
-        messages = await BatchQueries.get_messages_with_state(session, "embedding", limit)
+        messages = await BatchQueries.get_messages_without_embedding(session, limit)
         if not messages:
             return 0
 
         embeddings = await provider.embed([message.full_text for message in messages])
         for message, vector in zip(messages, embeddings):
             message.embedding = vector
-            message.processing_state = {
-                **message.processing_state,
-                "embedding": ProcessingStatus.DONE,
-            }
 
         logger.info(f"Embedded {len(messages)} messages")
         return len(messages)

@@ -8,11 +8,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # Ranking default: both score channels are normalized to 0..1 by `backend.search.scoring`
 # before the formula runs, and `link_weight` gives an unconsolidated item 0.5 and a
 # 100-link item 1.0 (logarithmic in between). Formulas are user-authored and evaluated
-# with `eval`; the resulting exposure is tracked as issue 001 in `plan/issue.md`.
+# with `eval`, which is not a security boundary (see `backend.search.scoring`).
 DEFAULT_RANKING_FORMULA = (
     "lambda vector_score, bm25_score, salience, linked_count: "
     "max(vector_score, bm25_score) * salience * link_weight(linked_count)"
 )
+
+# Ordered default rubric for the salience decision question, lowest level first: the
+# decision model's answer is a probability-weighted zero-based level index, normalized
+# by len(rubric) - 1 into the 0..1 salience. Chatgroups override it per prompts key.
+DEFAULT_SALIENCE_RUBRIC = [
+    "Trivial: greetings, filler, or noise; not worth remembering.",
+    "Low: minor context that will rarely matter later.",
+    "Moderate: useful context or conversational continuity.",
+    "High: meaningful personal facts, plans, or preferences worth keeping.",
+    "Critical: core information - decisions, key people, dates, commitments.",
+]
 
 
 class MemoryRatio(BaseModel):
@@ -29,7 +40,7 @@ class ChatGroupConfig(BaseModel):
     # Null or false opts the chatgroup out of salience scoring: rows keep
     # salience_score NULL (nothing is fabricated) and the search formula passes the
     # neutral salience (1.0) for them.
-    use_salience: bool | None = True
+    use_salience: bool = True
     # The x most recent messages of a chat never enter facts/events/topics until newer
     # messages push them out of the window. The default follows the deployment's
     # VISTUI_PROTECTED_MESSAGE_COUNT setting; each chatgroup can override it.
@@ -44,7 +55,15 @@ class ChatGroupConfig(BaseModel):
 
 
 class ChatGroupPrompts(BaseModel):
-    salience: str = "Assign a salience score between 0 and 1 to the message."
+    # Full instruction template for the salience decision question: `{kind}` is
+    # substituted with "message", "event", "topic" or "fact"; a template without the
+    # placeholder is sent verbatim.
+    salience: str = "Judge how much the {kind} in the state is worth remembering for future conversations."
+    # Ordered rubric levels offered to the decision model, lowest first. The decision
+    # model scores against 2-10 levels, so shorter or longer rubrics are rejected.
+    salience_rubric: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_SALIENCE_RUBRIC), min_length=2, max_length=10
+    )
     memory_ratio: str = "Determine the desired memory category distribution."
     event: str = "Summarize a contiguous block of messages into one or more events."
     topic_candidate: str = "Select existing topics to update or decide to create a new topic."

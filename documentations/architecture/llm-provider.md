@@ -150,7 +150,7 @@ class Provider:
 
 | Template | Inputs |
 |----------|--------|
-| `salience` | message text, role, ChatGroup description. |
+| `salience` | message text, role, ChatGroup description. The template's `{kind}` is substituted with the element type; the question's criteria come from the chatgroup's `salience_rubric` prompts key (2-10 ordered levels, 5-level default). |
 | `memory_ratio` | message text, role, ChatGroup description. |
 | `event` | contiguous message block, existing event summary (if continuing). |
 | `topic_candidate` | existing topic summaries, new message, `max_topics_per_message`. |
@@ -210,4 +210,8 @@ conversational text.
 - 2026-11-15: Added `defaults.decision` and `Provider.decide()` for System One decision models (`/v1/systemone`): typed `choice`/`noul`/`score` questions, probability answers, direct-ollama routing only.
 - 2026-11-15: Salience stages switched from batched calls (chunked at 5 questions) to
   element-per-element scoring — one `decide()` call per message / memory object.
-- 2026-11-15: Plan 4.4 — `decide()` gained the `task` parameter (overrides map now serves decision tasks too); the salience stages score messages and memory objects with `d3:4b` against a 5-level rubric, `keep_alive` keeps the model warm between rounds.
+- 2026-11-21: The salience decision question is fully configurable per chatgroup: the
+  `salience` prompts key holds the complete instruction template (`{kind}` substituted
+  with the element type) and the new `salience_rubric` key holds the ordered rubric
+  levels (2-10); score normalization adapts to the rubric length.
+- 2026-11-15: `decide()` gained the `task` parameter (overrides map now serves decision tasks too); the salience stages score messages and memory objects with `d3:4b` against a 5-level rubric, `keep_alive` keeps the model warm between rounds.

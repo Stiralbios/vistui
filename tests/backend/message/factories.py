@@ -24,8 +24,6 @@ class MessageFactory(BaseFactory[MessageDO]):
     role = MessageRole.USER
     salience_score = 0.5
     processing_state = {
-        "embedding": "waiting",
-        "salience": "waiting",
         "event": "waiting",
         "topic": "waiting",
         "fact": "waiting",

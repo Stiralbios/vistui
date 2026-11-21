@@ -16,7 +16,7 @@ class FactDO(Base):
     full_text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
     start_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_edited_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    edited_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     salience_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())

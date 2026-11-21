@@ -18,7 +18,7 @@ class TopicRead(TopicBase):
     salience_score: float | None
     messages_linked_count: int = 0
     start_at: dt.datetime
-    last_edited_at: dt.datetime
+    edited_at: dt.datetime
     created_at: dt.datetime
     updated_at: dt.datetime | None
 
@@ -37,7 +37,6 @@ class TopicInternal(TopicRead):
 
 class TopicCreate(TopicBase):
     start_at: dt.datetime
-    last_edited_at: dt.datetime
 
 
 class TopicContext(BaseModel):
@@ -55,9 +54,8 @@ class TopicUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     full_text: str | None = Field(default=None, max_length=32000)
-    last_edited_at: dt.datetime | None = None
 
-    @field_validator("full_text", "last_edited_at", mode="before")
+    @field_validator("full_text", mode="before")
     def prevent_explicit_none(cls, value: Any) -> Any:
         if value is None:
             raise ValueError("Explicit None is not allowed for this field")

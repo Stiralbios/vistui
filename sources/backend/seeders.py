@@ -81,9 +81,9 @@ _DEMO_MESSAGES = [
 
 
 def _default_processing_state() -> dict:
+    # Only the consolidation flags: the embedding and salience stages are queued by the
+    # NULL columns themselves — seeded messages start with both NULL.
     return {
-        "embedding": ProcessingStatus.WAITING,
-        "salience": ProcessingStatus.WAITING,
         "event": ProcessingStatus.WAITING,
         "topic": ProcessingStatus.WAITING,
         "fact": ProcessingStatus.WAITING,
@@ -150,8 +150,7 @@ async def seed_demo_chat() -> dict:
                 prev_message_id=prev_id,
                 full_text=text,
                 role=role,
-                # No placeholder: salience starts NULL and is scored by the salience
-                # stage (plan 4.4, decision model).
+                # No placeholder: salience starts NULL and is scored by the salience stage.
                 processing_state=_default_processing_state(),
                 created_at=created_at,
             )

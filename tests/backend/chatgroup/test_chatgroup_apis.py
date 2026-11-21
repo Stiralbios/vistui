@@ -123,3 +123,59 @@ async def test_chatgroup_not_owned(client: AsyncClient):
         headers={"Authorization": f"Bearer {token_b}"},
     )
     assert response.status_code == 404
+
+
+async def test_create_chatgroup_validates_salience_rubric(client: AsyncClient):
+    """The salience rubric drives a 2-10 level score question, so a chatgroup with a
+    1-level or 11-level rubric is rejected."""
+    token = await login(client, "test@example.com", "devpassword123")
+
+    for rubric in (["Only one level."], [f"Level {i}." for i in range(11)]):
+        response = await client.post(
+            "/api/v1/chatgroups",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "Rubric Group", "prompts": {"salience_rubric": rubric}},
+        )
+        assert response.status_code == 422
+
+
+async def test_update_chatgroup_custom_salience_prompt(client: AsyncClient):
+    """A chatgroup owner can store a custom salience instruction template and rubric."""
+    token = await login(client, "test@example.com", "devpassword123")
+    chatgroup_data = await _create_chatgroup(client, token)
+
+    response = await client.patch(
+        f"/api/v1/chatgroups/{chatgroup_data['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "prompts": {
+                "salience": "Custom {kind} template.",
+                "salience_rubric": ["Forgettable.", "Essential."],
+            }
+        },
+    )
+    assert response.status_code == 200
+    prompts = response.json()["prompts"]
+    assert prompts["salience"] == "Custom {kind} template."
+    assert prompts["salience_rubric"] == ["Forgettable.", "Essential."]
+
+
+async def test_chatgroup_use_salience_must_be_boolean(client: AsyncClient):
+    """use_salience is a plain boolean: missing defaults to true, and JSON null is
+    rejected."""
+    token = await login(client, "test@example.com", "devpassword123")
+
+    response = await client.post(
+        "/api/v1/chatgroups",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Null Salience", "config": {"use_salience": None}},
+    )
+    assert response.status_code == 422
+
+    chatgroup_data = await _create_chatgroup(client, token)
+    response = await client.patch(
+        f"/api/v1/chatgroups/{chatgroup_data['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"config": {"use_salience": None}},
+    )
+    assert response.status_code == 422

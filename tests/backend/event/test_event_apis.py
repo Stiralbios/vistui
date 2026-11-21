@@ -83,6 +83,8 @@ async def test_create_event(client: AsyncClient):
     data = response.json()
     assert data["full_text"] == "An event"
     assert data["chat_id"] == chat["id"]
+    # Creation writes the text, so edited_at starts at the creation time.
+    assert data["edited_at"] == data["created_at"]
 
 
 async def test_retrieve_event(client: AsyncClient):
@@ -113,7 +115,10 @@ async def test_update_event(client: AsyncClient):
         json={"full_text": "Updated event"},
     )
     assert response.status_code == 200
-    assert response.json()["full_text"] == "Updated event"
+    data = response.json()
+    assert data["full_text"] == "Updated event"
+    # Rewriting the text bumps edited_at.
+    assert data["edited_at"] != data["created_at"]
 
 
 async def test_delete_event(client: AsyncClient):

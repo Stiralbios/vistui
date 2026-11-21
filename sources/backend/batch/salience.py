@@ -2,16 +2,21 @@
 
 Salience (0.0-1.0) expresses how much a text is worth remembering. It is computed by
 the decision model (an ollama System One model such as ``d3:4b``, called through
-``Provider.decide``) as a `score` question against a fixed rubric: the answer's
-probability-weighted rubric index is normalized by the number of levels minus one.
+``Provider.decide``) as a `score` question against the chatgroup's rubric (2-10
+ordered levels, the ``salience_rubric`` prompts key — 5 levels by default): the
+answer's probability-weighted rubric index is normalized by the number of levels
+minus one, so any rubric length maps to the same 0..1 salience.
 
 Every element is scored in its own decide() call, element per element like the other
 batch stages: the state carries the chatgroup description plus the single message or
-memory object, and one question named "salience".
+memory object, and one question named "salience". The question's instructions are
+the chatgroup's ``salience`` prompt template with ``{kind}`` substituted.
 
-ChatGroups with ``use_salience`` false or null opt out: their rows keep
+ChatGroups with ``use_salience`` false opt out: their rows keep
 ``salience_score = NULL`` (nothing is fabricated) and the search formula passes the
-neutral 1.0 for them (see ``backend.search.service``).
+neutral 1.0 for them (see ``backend.search.service``). For messages the opt-out is
+enforced in the selection query (no row is ever picked, so the queue never clogs);
+for memory objects the stage skips them in Python.
 """
 
 import uuid
@@ -20,28 +25,20 @@ from typing import Protocol, TypeVar
 from backend.batch.queries import BatchQueries
 from backend.chat.models import ChatDO
 from backend.chatgroup.models import ChatGroupDO
-from backend.chatgroup.schemas import ChatGroupConfig, ChatGroupPrompts
+from backend.chatgroup.schemas import (
+    DEFAULT_SALIENCE_RUBRIC,
+    ChatGroupConfig,
+    ChatGroupPrompts,
+)
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO
 from backend.fact.models import FactDO
 from backend.llm.provider import DecisionAnswer, Provider, ScoreQuestion
-from backend.message.constants import ProcessingStatus
-from backend.message.models import MessageDO
 from backend.search.scoring import clamp_unit
 from backend.topic.models import TopicDO
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-# Ordered rubric for the decision model's `score` question, lowest level first: the
-# answer's score (probability-weighted zero-based index) is normalized by len - 1.
-SALIENCE_RUBRIC = [
-    "Trivial: greetings, filler, or noise; not worth remembering.",
-    "Low: minor context that will rarely matter later.",
-    "Moderate: useful context or conversational continuity.",
-    "High: meaningful personal facts, plans, or preferences worth keeping.",
-    "Critical: core information - decisions, key people, dates, commitments.",
-]
 
 # Keep the decision model loaded between the per-element calls of a round.
 KEEP_ALIVE = "10m"
@@ -66,28 +63,36 @@ S = TypeVar("S", bound=_Salient)
 
 
 def _use_salience(chatgroup: ChatGroupDO) -> bool:
-    """False or null `use_salience` opts the chatgroup out of salience scoring."""
+    """A false `use_salience` opts the chatgroup out of salience scoring."""
     return bool(chatgroup.config.get("use_salience", ChatGroupConfig().use_salience))
 
 
 def _chatgroup_prompt(chatgroup: ChatGroupDO) -> str:
-    """The chatgroup's salience prompt template, used as the question instructions base."""
+    """The chatgroup's salience instruction template."""
     return chatgroup.prompts.get("salience") or ChatGroupPrompts().salience
 
 
-def _question(prompt: str, kind: str) -> ScoreQuestion:
-    """Build the score question for the single element of the state."""
+def _chatgroup_rubric(chatgroup: ChatGroupDO) -> list[str]:
+    """The chatgroup's ordered salience rubric levels, lowest first."""
+    return list(chatgroup.prompts.get("salience_rubric") or DEFAULT_SALIENCE_RUBRIC)
+
+
+def _question(chatgroup: ChatGroupDO, kind: str) -> ScoreQuestion:
+    """Build the score question for the single element of the state: the chatgroup's
+    instruction template with `{kind}` substituted (a template without the placeholder
+    is sent verbatim) and its rubric as the criteria."""
     return ScoreQuestion(
-        instructions=f"{prompt} Judge the {kind} in the state.",
-        criteria=SALIENCE_RUBRIC,
+        instructions=_chatgroup_prompt(chatgroup).replace("{kind}", kind),
+        criteria=_chatgroup_rubric(chatgroup),
     )
 
 
-def _normalize(answer: DecisionAnswer) -> float:
-    """Map a rubric score answer (0-based weighted index) to a salience in [0, 1]."""
+def _normalize(answer: DecisionAnswer, rubric_length: int) -> float:
+    """Map a rubric score answer (0-based weighted index) to a salience in [0, 1],
+    scaled by the rubric length."""
     if answer.score is None:
         raise ValueError(f"salience decision answer has no score: {answer}")
-    return clamp_unit(answer.score / (len(SALIENCE_RUBRIC) - 1))
+    return clamp_unit(answer.score / (rubric_length - 1))
 
 
 async def _chatgroup_ids_by_chat(
@@ -121,65 +126,53 @@ async def _score_element(
     carries the chatgroup description plus the element itself. Returns the salience in
     [0, 1]."""
     state = {"chatgroup": chatgroup.description, kind: fields}
+    question = _question(chatgroup, kind)
     answers = await provider.decide(
         state,
-        {QUESTION_NAME: _question(_chatgroup_prompt(chatgroup), kind)},
+        {QUESTION_NAME: question},
         task=SALIENCE_TASK,
         keep_alive=KEEP_ALIVE,
     )
-    return _normalize(answers[QUESTION_NAME])
+    return _normalize(answers[QUESTION_NAME], len(question.criteria))
 
 
 class SaliencePipeline:
-    """Score the oldest waiting messages with the decision model, one decide() call per
-    message.
+    """Score the oldest messages with a NULL salience_score, one decide() call
+    per message (the NULL column is the queue marker — a failed round rolls back and
+    retries come for free).
 
-    The stage runs for every message, protected window included (like the embedding
-    stage). Opted-out chatgroups only get their `salience` flag marked done: the
-    score stays NULL and search passes the neutral salience.
+    The stage runs for every selected message, protected window included (like the
+    embedding stage), and does not wait for the embedding stage. ChatGroups with
+    `use_salience` false are excluded by the selection query: their messages keep the
+    NULL score (nothing is fabricated) and search passes the neutral salience for them.
     """
 
     @classmethod
     async def run_round(cls, provider: Provider | None = None, limit: int = 5) -> int:
-        """Score up to `limit` oldest messages with processing_state.salience == waiting
+        """Score up to `limit` oldest messages whose salience_score is NULL
         (the worker passes its configured VISTUI_BATCH_SALIENCE_LIMIT).
-        Returns the number of messages handled (scored or opted out)."""
+        Returns the number of messages scored."""
         provider = provider or Provider()
         async with get_async_sessionmaker()() as session, session.begin():
-            messages = await BatchQueries.get_messages_with_state(session, "salience", limit)
+            messages = await BatchQueries.get_messages_waiting_for_salience(session, limit)
             if not messages:
                 return 0
 
             chat_to_group = await _chatgroup_ids_by_chat(session, {m.chat_id for m in messages})
             chatgroups = await _load_chatgroups(session, set(chat_to_group.values()))
 
-            by_group: dict[uuid.UUID, list[MessageDO]] = {}
-            for message in messages:
-                by_group.setdefault(chat_to_group[message.chat_id], []).append(message)
-
             total = 0
-            for chatgroup_id, group_messages in by_group.items():
-                chatgroup = chatgroups[chatgroup_id]
-                if not _use_salience(chatgroup):
-                    for message in group_messages:
-                        message.processing_state = {
-                            **message.processing_state,
-                            "salience": ProcessingStatus.DONE,
-                        }
-                    total += len(group_messages)
-                    continue
+            for message in messages:
+                chatgroup = chatgroups[chat_to_group[message.chat_id]]
+                message.salience_score = await _score_element(
+                    provider,
+                    chatgroup,
+                    "message",
+                    {"role": message.role, "text": message.full_text},
+                )
+                total += 1
 
-                for message in group_messages:
-                    message.salience_score = await _score_element(
-                        provider,
-                        chatgroup,
-                        "message",
-                        {"role": message.role, "text": message.full_text},
-                    )
-                    message.processing_state = {**message.processing_state, "salience": ProcessingStatus.DONE}
-                total += len(group_messages)
-
-            logger.info(f"Salience pipeline handled {total} message(s)")
+            logger.info(f"Salience pipeline scored {total} message(s)")
             return total
 
 

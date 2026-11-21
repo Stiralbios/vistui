@@ -23,6 +23,8 @@ class BatchWorker:
 
     Progress is mirrored into `batch_status` for the admin API; a failing pipeline marks
     the message it was working on as FAILED without blocking the remaining pipelines.
+    The batch stages (embeddings, salience) work on NULL-column queues: a failed round
+    rolls back, the column stays NULL, and the next round retries for free.
     """
 
     def __init__(self) -> None:

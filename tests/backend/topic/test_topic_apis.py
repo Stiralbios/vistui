@@ -44,11 +44,7 @@ async def _create_topic(client: AsyncClient, token: str, chatgroup_id: uuid.UUID
     response = await client.post(
         f"/api/v1/topics?chatgroup_id={chatgroup_id}",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "full_text": full_text,
-            "start_at": "2026-07-25T10:00:00Z",
-            "last_edited_at": "2026-07-25T10:00:00Z",
-        },
+        json={"full_text": full_text, "start_at": "2026-07-25T10:00:00Z"},
     )
     assert response.status_code == 201
     return response.json()
@@ -72,16 +68,14 @@ async def test_create_topic(client: AsyncClient):
     response = await client.post(
         f"/api/v1/topics?chatgroup_id={chatgroup['id']}",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "full_text": "A topic",
-            "start_at": "2026-07-25T10:00:00Z",
-            "last_edited_at": "2026-07-25T10:00:00Z",
-        },
+        json={"full_text": "A topic", "start_at": "2026-07-25T10:00:00Z"},
     )
     assert response.status_code == 201
     data = response.json()
     assert data["full_text"] == "A topic"
     assert data["chatgroup_id"] == chatgroup["id"]
+    # Creation writes the text, so edited_at starts at the creation time.
+    assert data["edited_at"] == data["created_at"]
 
 
 async def test_retrieve_topic(client: AsyncClient):
@@ -110,7 +104,10 @@ async def test_update_topic(client: AsyncClient):
         json={"full_text": "Updated topic"},
     )
     assert response.status_code == 200
-    assert response.json()["full_text"] == "Updated topic"
+    data = response.json()
+    assert data["full_text"] == "Updated topic"
+    # Rewriting the text bumps edited_at.
+    assert data["edited_at"] != data["created_at"]
 
 
 async def test_delete_topic(client: AsyncClient):
