@@ -60,7 +60,7 @@ Vistui runs as a single Python process. APScheduler is embedded in the same proc
 
 - The FastAPI app listens on a configurable host/port (default `0.0.0.0:8000`).
 - Postgres is accessed via a standard `postgresql://` connection string from environment variable `VISTUI_DATABASE_URL`.
-- LLM and embedding providers are accessed over HTTP/HTTPS using URLs defined in `settings.yaml`.
+- LLM, decisions models and embedding providers are accessed over HTTP/HTTPS using URLs defined in `settings.yaml`.
 - No ingress, load balancer, or service mesh is required for single-instance deployment.
 
 ## Identity & security
