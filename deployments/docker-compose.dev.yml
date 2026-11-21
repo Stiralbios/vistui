@@ -28,7 +28,10 @@ services:
     volumes:
       - vistui_postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vistui -d vistui"]
+      # TCP probe on purpose: the default socket probe passes against the temporary
+      # server the entrypoint runs for initdb, so fresh volumes could look healthy
+      # before the real server accepts connections.
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -U vistui -d vistui"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -46,7 +49,10 @@ services:
     volumes:
       - vistui_postgres_test_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vistui -d vistui"]
+      # TCP probe on purpose: the default socket probe passes against the temporary
+      # server the entrypoint runs for initdb, so fresh volumes could look healthy
+      # before the real server accepts connections.
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -U vistui -d vistui"]
       interval: 5s
       timeout: 5s
       retries: 10

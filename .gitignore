@@ -228,3 +228,7 @@ uv.lock
 # Stow-generated local config (keep devconfigs/stow under version control)
 .vscode
 Vistui.code-workspace
+
+
+# demo local with personal data
+demo_local/

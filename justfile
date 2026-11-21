@@ -5,6 +5,11 @@ set dotenv-load
 export VISTUI_DATABASE_URL := env("VISTUI_DATABASE_URL", "postgresql+psycopg_async://vistui:vistui@localhost:5433/vistui")
 export VISTUI_TEST_DATABASE_URL := env("VISTUI_TEST_DATABASE_URL", "postgresql+psycopg_async://vistui:vistui@localhost:5434/vistui")
 
+# Owner of the demo data: created on app boot and by the demo_local import scripts.
+# Recipes that need different values override them inline.
+export DEFAULT_EMAIL := env("DEFAULT_EMAIL", "demo@vistui.local")
+export DEFAULT_PASSWORD := env("DEFAULT_PASSWORD", "demopassword123")
+
 # Start dev services (ParadeDB dev + test databases)
 up:
     docker compose -f deployments/docker-compose.dev.yml up -d
@@ -20,6 +25,18 @@ logs:
 # Apply Alembic migrations to the dev database
 migrate:
     PYTHONPATH=sources uv run alembic upgrade head
+
+# Recreate the dev services from scratch (volumes wiped), apply the migrations, then
+# import the demo_local data: default user, chatgroup, chat and 499 messages. The
+# import scripts are idempotent except the messages one, which refuses to append to
+# a chat that already has messages.
+demo:
+    docker compose -f deployments/docker-compose.dev.yml down -v
+    docker compose -f deployments/docker-compose.dev.yml up -d --wait
+    just migrate
+    PYTHONPATH=sources uv run python demo_local/import_chatgroup.py
+    PYTHONPATH=sources uv run python demo_local/import_chat.py
+    PYTHONPATH=sources uv run python demo_local/import_messages.py
 
 # Generate a new Alembic migration
 migration name:

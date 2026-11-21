@@ -9,7 +9,7 @@ messages. Frontend-agnostic: consumed by chatbot frontends / MCP servers.
 
 Python 3.14 · FastAPI + Pydantic · SQLAlchemy (async PostgreSQL with pgvector +
 pg_search) · Alembic migrations · APScheduler worker · LangChain / OpenAI-compatible
-LLM providers (configured in `providers.yaml`) · uv, devbox, just.
+LLM providers (configured in `settings.yaml`) · uv, devbox, just.
 
 ## Where things are
 
@@ -20,10 +20,12 @@ LLM providers (configured in `providers.yaml`) · uv, devbox, just.
 | `documentations/architecture/` | Architecture docs — start with `system-overview.md` |
 | `migrations/`, `alembic.ini` | Database migrations |
 | `plan/` | Design / issue planning notes |
+| `demo_local/` | Demo dataset + import scripts (`just demo` for a full reset) |
 
 ## Commands
 
 - `just up` / `just down` — start/stop dev services (ParadeDB dev + test DBs via Docker)
+- `just demo` — clean dev environment + imported demo chatgroup/chat/messages
 - `just test` — hermetic test suite (LLM clients mocked, integration tests skipped)
 - `just test-integration` — slow, real-LLM batch tests (opt-in)
 - `just run` — FastAPI dev server on port 8000
