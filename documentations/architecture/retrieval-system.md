@@ -57,9 +57,17 @@ The message `full_text` is sent to the configured embedding provider (see [`llm-
 
 ## Step 2: generate memory ratio
 
-A configured LLM prompt analyzes the message and produces a desired distribution of memory categories for retrieval. Whether this step runs is controlled by the ChatGroup config flag `use_llm_memory_ratio`.
-
-Output shape:
+When the ChatGroup config flag `use_llm_memory_ratio` is `true`, the **decision model**
+(the System One model configured for the `memory_ratio` task, e.g. `d3:4b` — see
+[llm-provider.md](llm-provider.md)) produces the desired distribution of memory
+categories for the query: one `decide()` call whose state carries the ChatGroup
+description and the query, with a single choice question whose criteria are the memory
+types the ChatGroup offers. The criteria come from the ChatGroup's
+`memory_ratio_criteria` prompts key: the labels are fixed to the memory types (the
+answer's probabilities are keyed by them and the packing looks its shares up by them),
+ChatGroups reword the descriptions, and a type left out of the criteria is offered no
+share. The answer's native probabilities over the criteria labels *are* the
+distribution:
 
 ```json
 {
@@ -70,9 +78,17 @@ Output shape:
 }
 ```
 
-The ratio is multiplied by the token budget to compute per-category budgets. Ratios must sum to 1.0 within a small tolerance. If the LLM output does not sum correctly, it is normalized before use.
+Unknown labels are dropped and the values renormalized to sum to 1; a missing label
+counts as 0. An unusable answer — a decision error, absent probabilities, or nothing
+surviving normalization — falls back to the `memory_ratio` stored in the ChatGroup
+config, which is also used verbatim (no renormalization) whenever
+`use_llm_memory_ratio` is `false`. The response reports the distribution actually
+applied (`memory_ratio`) and where it came from (`ratio_source`: `"decision"` or
+`"config"`).
 
-If `use_llm_memory_ratio` is `false`, or if the LLM call fails, the system falls back to the `memory_ratio` stored in the ChatGroup config.
+The ratio is multiplied by the token budget to compute per-type budgets. The step is
+opt-in per ChatGroup because the decision call adds several seconds to every search
+(the model stays loaded between searches via `keep_alive`).
 
 ## Step 3: save the message
 
@@ -97,9 +113,10 @@ The query returns top-N candidates per category with a raw vector score (e.g., `
 
 ### BM25 text search
 
-Uses the `pg_search` extension over `search_vector` columns.
-
-Search scope is the same as vector search. The query returns top-N candidates per category with a raw BM25 score. Candidates without a computed `search_vector` are excluded.
+Uses the `pg_search` extension: ParadeDB BM25 over the `full_text` columns of
+Messages, Events, Topics and Facts (the query string is token-quoted as literals
+before parsing). Search scope is the same as vector search. The query returns
+top-N candidates per category with a raw BM25 score.
 
 ## Step 5: normalize scores
 
@@ -152,43 +169,66 @@ lambda vector_score, bm25_score, salience, linked_count: max(
 
 Given:
 
-- Total token budget (`token_budget` from query param or ChatGroup default).
-- Per-category budgets (`memory_ratio * token_budget`).
-- Sorted candidates per category by relevance.
+- Total token budget: the optional `token_budget` query parameter (>= 1), falling back
+  to the ChatGroup config's `token_budget` (2000 by default).
+- Per-type budgets: `memory_ratio * token_budget` (a type with a zero share yields
+  nothing).
+- Ranked candidates per type.
 
 Packing algorithm:
 
-1. For each category in the order `fact`, `topic`, `event`, `message`:
-   1. Take candidates in descending relevance order.
-   2. Estimate tokens for the candidate `full_text`.
-   3. If the candidate fits in the remaining category budget, add it.
-   4. Stop when the category budget is exhausted.
-2. Sum used tokens per category.
+1. For each type in the order `fact`, `topic`, `event`, `message` (densest first):
+   1. Take the type's candidates in descending score order.
+   2. Add a candidate when its token estimate fits the type's remaining share; stop at
+      the first that does not (later, smaller candidates are not reconsidered).
+   3. The single best hit of a type with a positive share is always included, even
+      when it alone exceeds the share — a tiny budget must not silence a whole memory
+      type. This is the only way a type overshoots its share.
+2. Re-sort the packed hits globally by score and cap the list at `k` (default 20).
+3. Sum the used tokens per type over the returned hits.
 
 ### Token estimation
 
-Use a simple whitespace / punctuation tokenizer. The estimate is intentionally approximate; callers may re-tokenize with their own model tokenizer.
+`estimate_tokens(text)` counts BPE pieces of the text field with the local
+`tiktoken` tokenizer (`cl100k_base`, the same library LangChain's text splitters
+use; the encoding data is fetched once and cached). None of the served models uses
+this exact encoding — the count is a deliberately approximate estimate, far tighter
+than a whitespace split — and when the tokenizer cannot load (offline first boot,
+uncached), estimation degrades to whitespace word counts rather than failing the
+search. Callers re-tokenize with their own model's tokenizer when exactness matters.
 
 ## Step 8: return memory response
 
-The API returns a `memory` block as defined in [`api-contract.md`](api-contract.md), containing metadata about the budget, the memory ratio, and a list of memory items.
+The search response (see [`api-contract.md`](api-contract.md)) contains the packed
+hits — each carrying its token estimate — plus the bookkeeping: the effective
+`token_budget`, `tokens_used` per type, the applied `memory_ratio` and its
+`ratio_source`.
 
 ## Performance targets
 
 | Metric | Target | Notes |
 |--------|--------|-------|
 | Retrieval latency (no LLM) | < 200 ms p95 | Embedding + search + packing. |
-| Retrieval latency (with LLM ratio) | < 2 s p95 | Depends on LLM provider. |
-| Candidate pool size per category | 100 | Configurable via ChatGroup. |
+| Retrieval latency (with decision ratio) | + 5-10 s | One System One call per search when `use_llm_memory_ratio` is on; `keep_alive` keeps the model loaded. |
+| Candidate pool size per category | 20 | `_CANDIDATE_LIMIT` in `backend.search.service`. |
 
 ## Failure handling
 
 - If embedding generation fails: return an error; the message cannot be retrieved.
-- If memory ratio generation fails: fall back to the ChatGroup `memory_ratio` and continue.
+- If the memory-ratio decision fails or is unusable: fall back to the ChatGroup `memory_ratio` and continue.
 - If formula evaluation fails: fall back to default formula.
 - If vector or BM25 search fails partially: return results from the other search and log a warning.
 
 ## Changelog
 
+- 2026-11-21: Token-budget packing implemented as designed here, with the as-built
+  details: the ratio comes from one decision-model choice question (probabilities =
+  distribution) for chatgroups opting in via `use_llm_memory_ratio`, the `token_budget`
+  query parameter overrides the config default, packing stops at a type's first
+  misfit and always keeps the best hit of a non-zero-share type, the final list is
+  globally sorted and capped by `k`, and token counts are BPE estimates (whitespace
+  words when the tokenizer cannot load). The question's criteria are configurable per
+  chatgroup via the `memory_ratio_criteria` prompts key. BM25 runs over `full_text`
+  (ParadeDB `parse()`), not `search_vector` columns.
 - 2026-07-11: Initial retrieval system design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: score normalization documented before ranking formula, removed optional budget redistribution, removed open questions, memory ratio is generated by LLM or taken from ChatGroup config.

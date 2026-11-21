@@ -36,14 +36,14 @@ defaults:
 # chat tasks and decision tasks alike (decide(task=...) resolves here too). The chat
 # entries currently duplicate defaults.llm; 4.5 will split them (decision vs generation).
 overrides:
-  # Decision task (System One /v1/systemone), not a chat task: must point at a
+  # Decision tasks (System One /v1/systemone), not chat tasks: they must point at a
   # directly reachable ollama provider — gomodel cannot forward /v1/systemone.
   salience:
     provider: "local-ollama"
     model: "d3:4b"
   memory_ratio:
-    provider: "gomodel"
-    model: "strata_toaster/iq3_xxs"
+    provider: "local-ollama"
+    model: "d3:4b"
   event:
     provider: "gomodel"
     model: "strata_toaster/iq3_xxs"

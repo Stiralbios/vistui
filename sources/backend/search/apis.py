@@ -19,8 +19,13 @@ async def search(
     q: Annotated[str, Query(min_length=1, max_length=512, pattern=r"\S")],
     current_user: Annotated[UserInternal, Depends(get_current_active_user)],
     k: Annotated[int, Query(ge=1, le=100)] = 20,
+    token_budget: Annotated[int | None, Query(ge=1)] = None,
 ) -> SearchResponse:
-    """Hybrid (BM25 + vector) search across all memory types of one chatgroup."""
+    """Hybrid (BM25 + vector) search across all memory types of one chatgroup.
+
+    The hits are packed into `token_budget` tokens (the chatgroup config default when
+    the parameter is absent), split per memory type by the chatgroup's memory ratio.
+    """
     chatgroup = await ChatGroupService().retrieve(chatgroup_id, current_user.id)
-    hits = await search_chatgroup(chatgroup, q, k)
-    return SearchResponse(q=q, hits=hits)
+    budget = token_budget if token_budget is not None else chatgroup.config.token_budget
+    return await search_chatgroup(chatgroup, q, k, budget)

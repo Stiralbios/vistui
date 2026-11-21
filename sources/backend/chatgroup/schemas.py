@@ -25,6 +25,18 @@ DEFAULT_SALIENCE_RUBRIC = [
     "Critical: core information - decisions, key people, dates, commitments.",
 ]
 
+# Criteria of the memory-ratio choice question, keyed by memory type: the decision
+# model reports its probability distribution over these keys, and the search packing
+# looks its shares up by them — so the keys are fixed to the four memory types while
+# chatgroups reword the descriptions. A type left out of the criteria is offered no
+# share of the retrieval budget.
+DEFAULT_MEMORY_RATIO_CRITERIA = {
+    "message": "A verbatim chat message.",
+    "event": "A summary of a contiguous sequence of messages.",
+    "topic": "A summary of a recurring theme across the chatgroup.",
+    "fact": "A small persistent fact about the user or the world state.",
+}
+
 
 class MemoryRatio(BaseModel):
     message: float = 0.40
@@ -65,11 +77,27 @@ class ChatGroupPrompts(BaseModel):
         default_factory=lambda: list(DEFAULT_SALIENCE_RUBRIC), min_length=2, max_length=10
     )
     memory_ratio: str = "Determine the desired memory category distribution."
+    # Criteria of the memory-ratio choice question, keyed by memory type (at least
+    # two entries — choice questions need two or more options).
+    memory_ratio_criteria: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_MEMORY_RATIO_CRITERIA))
     event: str = "Summarize a contiguous block of messages into one or more events."
     topic_candidate: str = "Select existing topics to update or decide to create a new topic."
     topic_update: str = "Update a specific topic given the message and ChatGroup context."
     fact_candidate: str = "Select existing facts to update or decide to create a new fact."
     fact_update: str = "Update a specific fact given the message and its recent history."
+
+    @field_validator("memory_ratio_criteria")
+    @classmethod
+    def validate_memory_ratio_criteria(cls, value: dict[str, str]) -> dict[str, str]:
+        """The criteria keys must be memory types — the decision model's probability
+        keys and the packing shares are looked up by them — and choice questions need
+        at least two options."""
+        unknown = set(value) - set(DEFAULT_MEMORY_RATIO_CRITERIA)
+        if unknown:
+            raise ValueError(f"memory_ratio_criteria keys must be memory types, got: {sorted(unknown)}")
+        if len(value) < 2:
+            raise ValueError("memory_ratio_criteria needs at least two entries")
+        return value
 
 
 class ChatGroupBase(BaseModel):

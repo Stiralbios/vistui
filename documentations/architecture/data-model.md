@@ -117,9 +117,9 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 
 | Setting | Purpose |
 |---------|---------|
-| `token_budget` | Default max tokens to return in memory retrieval. |
-| `memory_ratio` | Default category distribution when the LLM-based ratio is disabled or fails. |
-| `use_llm_memory_ratio` | If `true`, generate the memory ratio with an LLM per message. If `false`, use `memory_ratio`. |
+| `token_budget` | Token budget search hits are packed into; the `token_budget` query parameter overrides it per request. |
+| `memory_ratio` | Category distribution used verbatim when the decision-model ratio is disabled or unusable. |
+| `use_llm_memory_ratio` | If `true`, ask the decision model for the ratio on every search. If `false`, use `memory_ratio`. |
 | `protected_message_count` | Number of most recent messages never added to facts/events/topics until newer messages push them out of the window. Default follows the deployment's `VISTUI_PROTECTED_MESSAGE_COUNT` setting (10). |
 | `topic_update_threshold` | Minimum score for a topic to be considered for updating. |
 | `fact_update_threshold` | Minimum score for a fact to be considered for updating. |
@@ -135,7 +135,8 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 |------------|---------|
 | `salience` | Full instructions template for the salience decision question; `{kind}` is substituted with `message`/`event`/`topic`/`fact`. |
 | `salience_rubric` | Ordered rubric levels (2-10, lowest first) the decision model scores against; the answer is normalized by `len - 1`. |
-| `memory_ratio` | Determine desired memory category distribution for retrieval. |
+| `memory_ratio` | Instructions of the memory-ratio choice question (decision task). |
+| `memory_ratio_criteria` | Criteria of the memory-ratio choice question, keyed by memory type (labels fixed, descriptions reworded; at least two entries, a type left out gets no retrieval share). |
 | `event` | Summarize a contiguous block of messages into one or more events. |
 | `topic_candidate` | Select up to `max_topics_per_message` existing topics to update, or decide to create new topics. |
 | `topic_update` | Update a specific topic given the message and ChatGroup context. |
@@ -300,6 +301,9 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
 
 ## Changelog
 
+- 2026-11-21: New prompts key `memory_ratio_criteria` (criteria descriptions of the
+  memory-ratio choice question, keyed by memory type). Token estimates for retrieval
+  packing are BPE counts (tiktoken `cl100k_base`), whitespace words as fallback.
 - 2026-11-21: Consolidation eligibility is the protected window only (embedding and
   salience are enrichment fields, not prerequisites). `use_salience` is a plain boolean.
   `edited_at` on messages, events, topics and facts records when the text was last

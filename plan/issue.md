@@ -100,6 +100,29 @@ Search should return the x best result. Limited by the amount of token the clien
 Each result is added by type, until it reach it's token percent. Ordered by score. Only the text content count for the token amount.
 Configurable message like for other prompts
 
+**Status (2026-11-21): DONE** — implemented as plan 5 Phase D (see `plan/plan5.md`
+Results). As built:
+
+- `GET /chatgroups/{id}/search` takes an optional `token_budget` (>= 1), falling back
+  to the chatgroup config's `token_budget` (2000). `k` stays the hit cap.
+- The ratio comes from one `Provider.decide(task="memory_ratio")` call for chatgroups
+  with `use_llm_memory_ratio` true: a single choice question whose criteria are the
+  chatgroup's `memory_ratio_criteria` prompts entries (labels fixed to the memory
+  types, at least two); the answer's native probabilities are the distribution
+  (renormalized, unknown labels dropped, missing labels 0). Config ratio otherwise,
+  used verbatim. Decision error / absent probabilities / zero sum fall back to the
+  config ratio; the response reports `ratio_source`.
+- Packing per type in fact/topic/event/message order, candidates by descending score,
+  stopping at the first that does not fit the type's share; the best hit of a
+  positive-share type is always included (a tiny budget cannot silence a memory
+  type). Final list globally sorted by score, capped by `k`.
+- `estimate_tokens(text)` counts BPE pieces with the local tiktoken tokenizer
+  (`cl100k_base` — the tokenizer LangChain's text splitters use; whitespace words as
+  fallback when it cannot load); hits carry `tokens`, the response carries
+  `token_budget`, `tokens_used`, `memory_ratio`, `ratio_source`.
+- providers.yaml: the `memory_ratio` override moved to `local-ollama` / `d3:4b`
+  (gomodel cannot proxy `/v1/systemone`).
+
 ## Issue 003 — Key embedding and salience in message processing state: do we really need them ?
 
 Resolution (2026-11-15): no, they are redundant — same conclusion as for memory

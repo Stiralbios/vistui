@@ -139,6 +139,36 @@ async def test_create_chatgroup_validates_salience_rubric(client: AsyncClient):
         assert response.status_code == 422
 
 
+async def test_create_chatgroup_validates_memory_ratio_criteria(client: AsyncClient):
+    """The memory-ratio criteria drive a choice question over the four memory types:
+    unknown keys are rejected, and at least two criteria must be offered (choice
+    questions need two or more options)."""
+    token = await login(client, "test@example.com", "devpassword123")
+
+    for criteria in (
+        {"gibberish": "Something.", "message": "A message."},
+        {"message": "Only one type."},
+    ):
+        response = await client.post(
+            "/api/v1/chatgroups",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "Criteria Group", "prompts": {"memory_ratio_criteria": criteria}},
+        )
+        assert response.status_code == 422
+
+    # A valid subset of the memory types is accepted.
+    response = await client.post(
+        "/api/v1/chatgroups",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Criteria Group",
+            "prompts": {"memory_ratio_criteria": {"message": "Words.", "topic": "Themes."}},
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["prompts"]["memory_ratio_criteria"] == {"message": "Words.", "topic": "Themes."}
+
+
 async def test_update_chatgroup_custom_salience_prompt(client: AsyncClient):
     """A chatgroup owner can store a custom salience instruction template and rubric."""
     token = await login(client, "test@example.com", "devpassword123")

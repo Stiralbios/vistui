@@ -212,7 +212,8 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 200
-        hits = response.json()["hits"]
+        data = response.json()
+        hits = data["hits"]
         assert len(hits) > 0
         scores = [hit["score"] for hit in hits]
         assert scores == sorted(scores, reverse=True)
@@ -220,3 +221,39 @@ async def test_startup_demo_data_real_provider_consolidation(client: AsyncClient
         # retrieved the embedded memories; both channels are merged in the hits.
         assert any(hit["type"] == "message" and hit["bm25_score"] > 0 for hit in hits)
         assert any(hit["vector_score"] > 0 for hit in hits)
+        # The chatgroup has not opted into the decision-model ratio: the config ratio
+        # packs the (generous) default budget.
+        assert data["ratio_source"] == "config"
+        assert data["token_budget"] == 2000
+
+        # 5. Token-budget packing with the real decision-model ratio: opt the demo
+        # chatgroup into `use_llm_memory_ratio` and search with a small budget. The
+        # real d3 call must return a usable distribution over the four types; the
+        # packed hits respect it, with the best-hit rule as the only overshoot.
+        async with get_async_sessionmaker()() as session, session.begin():
+            chatgroup = await session.scalar(select(ChatGroupDO).where(ChatGroupDO.id == chat.chatgroup_id))
+            chatgroup.config = {**chatgroup.config, "use_llm_memory_ratio": True}
+
+        response = await client.get(
+            f"/api/v1/chatgroups/{chat.chatgroup_id}/search",
+            params={"q": "hiking Japan photography", "token_budget": 120},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ratio_source"] == "decision"
+        assert data["token_budget"] == 120
+        ratio = data["memory_ratio"]
+        assert set(ratio) == {"message", "event", "topic", "fact"}
+        assert sum(ratio.values()) == pytest.approx(1.0)
+        hits = data["hits"]
+        assert len(hits) <= 20
+        scores = [hit["score"] for hit in hits]
+        assert scores == sorted(scores, reverse=True)
+        assert all(hit["tokens"] > 0 for hit in hits)
+        for label, used in data["tokens_used"].items():
+            assert used == sum(hit["tokens"] for hit in hits if hit["type"] == label)
+            if used > ratio[label] * data["token_budget"]:
+                # Only the best-hit rule lets a type exceed its share, and then the
+                # type's single best hit is everything it got.
+                assert len([hit for hit in hits if hit["type"] == label]) == 1

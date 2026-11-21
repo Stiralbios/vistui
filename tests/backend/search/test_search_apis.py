@@ -1,5 +1,6 @@
-"""Tests for the hybrid search API and ranking formula evaluation."""
+"""Tests for the hybrid search API, ranking formula evaluation and token-budget packing."""
 
+import contextlib
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -18,7 +19,7 @@ from backend.chatgroup.schemas import (
 )
 from backend.database import get_async_sessionmaker
 from backend.llm import Provider
-from backend.llm.provider import DecisionAnswer
+from backend.llm.provider import DecisionAnswer, DecisionError
 from backend.message.constants import ProcessingStatus
 from backend.message.models import MessageDO
 from backend.search.scoring import LINK_WEIGHT_REFERENCE, evaluate_ranking_formula, link_weight, normalize_bm25
@@ -69,25 +70,56 @@ def _fake_chat_model():
     return FakeChatModel
 
 
-def _fake_decide():
+def _fake_decide(
+    ratio_probabilities: dict[str, float] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+    error: bool = False,
+    omit_probabilities: bool = False,
+):
     """Decision calls return the top rubric level for messages (salience 1.0) but a
     mid level for memory objects (0.5): the event then keeps ranking below the plain
-    messages through its lower salience, exercising the formula's salience factor."""
+    messages through its lower salience, exercising the formula's salience factor.
+
+    A `memory_ratio` choice question is answered with `ratio_probabilities` (the
+    config-ratio defaults when None), without any probabilities when
+    `omit_probabilities` is set, or raised as DecisionError when `error` is set.
+    `calls` records every call when given."""
 
     async def decide(self, state, questions, task=None, keep_alive=None):
+        if calls is not None:
+            calls.append({"state": state, "questions": questions, "task": task})
+        if "memory_ratio" in questions:
+            if error:
+                raise DecisionError("decision model unavailable")
+            probabilities = None
+            if not omit_probabilities:
+                probabilities = ratio_probabilities or {"message": 0.4, "event": 0.1, "topic": 0.3, "fact": 0.2}
+            return {"memory_ratio": DecisionAnswer(type="choice", choice="message", probabilities=probabilities)}
         score = 4.0 if "message" in state else 2.0
         return {name: DecisionAnswer(type="score", score=score) for name in questions}
 
     return decide
 
 
-@pytest.fixture
-def fake_langchain_client():
+@contextlib.contextmanager
+def _fake_provider(
+    ratio_probabilities: dict[str, float] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+    error: bool = False,
+    omit_probabilities: bool = False,
+):
+    """Patch the LangChain wiring and the decision calls for the wrapped block."""
     with (
         patch("backend.llm.provider.OpenAIEmbeddings", _fake_embeddings()),
         patch("backend.llm.provider.ChatOpenAI", _fake_chat_model()),
-        patch.object(Provider, "decide", _fake_decide()),
+        patch.object(Provider, "decide", _fake_decide(ratio_probabilities, calls, error, omit_probabilities)),
     ):
+        yield
+
+
+@pytest.fixture
+def fake_langchain_client():
+    with _fake_provider():
         yield
 
 
@@ -97,16 +129,19 @@ async def login(client: AsyncClient, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-async def _seed_search_data() -> dict:
-    """Create a chatgroup with ten messages: three about hiking, seven about other topics."""
+async def _seed_search_data(use_llm_memory_ratio: bool = False, prompts: dict[str, Any] | None = None) -> dict:
+    """Create a chatgroup with ten messages: three about hiking, seven about other
+    topics. `prompts` updates individual prompts keys on top of the schema defaults."""
+    chat_prompts = ChatGroupPrompts().model_dump()
+    chat_prompts.update(prompts or {})
     async with get_async_sessionmaker()() as session, session.begin():
         user = await session.scalar(select(UserDO).where(UserDO.email == "test@example.com"))
         chatgroup = ChatGroupDO(
             id=uuid.uuid4(),
             user_id=user.id,
             name="Search Group",
-            config=ChatGroupConfig(protected_message_count=0).model_dump(),
-            prompts=ChatGroupPrompts().model_dump(),
+            config=ChatGroupConfig(protected_message_count=0, use_llm_memory_ratio=use_llm_memory_ratio).model_dump(),
+            prompts=chat_prompts,
             ranking_formula=DEFAULT_RANKING_FORMULA,
         )
         session.add(chatgroup)
@@ -354,3 +389,154 @@ async def test_create_chatgroup_accepts_custom_ranking_formula(client: AsyncClie
     )
     assert response.status_code == 201
     assert response.json()["ranking_formula"].startswith("lambda vector_score")
+
+
+def _hit_tokens(data: dict) -> dict[str, int]:
+    """Whitespace tokens of the returned hits, per type, as the response reports them."""
+    used = {"message": 0, "event": 0, "topic": 0, "fact": 0}
+    for hit in data["hits"]:
+        used[hit["type"]] += hit["tokens"]
+    return used
+
+
+def _type_counts(data: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for hit in data["hits"]:
+        counts[hit["type"]] = counts.get(hit["type"], 0) + 1
+    return counts
+
+
+CONFIG_RATIO = {"message": 0.40, "event": 0.10, "topic": 0.30, "fact": 0.20}
+
+
+async def _search(client: AsyncClient, token: str, chatgroup_id: uuid.UUID, **params) -> dict:
+    response = await client.get(
+        f"/api/v1/chatgroups/{chatgroup_id}/search",
+        params=params,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_search_packs_token_budget(client: AsyncClient):
+    """A small `token_budget` packs the hits per type share: the best hit of each type
+    is kept (even over its share), lower-ranked hits of the type are dropped once the
+    share is exhausted, and the budget/ratio bookkeeping is reported."""
+    ids = await _seed_search_data()
+    assert (await client.post("/admin/batch/trigger")).status_code == 200
+    assert (await client.post("/admin/batch/trigger")).status_code == 200
+
+    token = await login(client, "test@example.com", "devpassword123")
+    # A generous budget keeps every hit (13: ten messages, one event, one topic, one fact).
+    full = await _search(client, token, ids["chatgroup_id"], q="hiking")
+    assert full["token_budget"] == 2000  # the chatgroup config default
+    assert full["ratio_source"] == "config"
+    assert full["memory_ratio"] == CONFIG_RATIO
+    assert len(full["hits"]) == 13
+
+    # Budget 8 with the config ratio gives tiny shares (message 3.2, event 0.8,
+    # topic 2.4, fact 1.6 tokens): the event and fact exceed their shares and the best
+    # message dwarfs its own, so each type survives only through the best-hit rule;
+    # no second message fits afterwards.
+    packed = await _search(client, token, ids["chatgroup_id"], q="hiking", token_budget=8)
+    assert packed["token_budget"] == 8
+    assert packed["ratio_source"] == "config"
+    assert packed["memory_ratio"] == CONFIG_RATIO
+    assert _type_counts(packed) == {"message": 1, "event": 1, "topic": 1, "fact": 1}
+    scores = [hit["score"] for hit in packed["hits"]]
+    assert scores == sorted(scores, reverse=True)
+    # tokens_used matches the returned hits per type; the total exceeds the budget
+    # only through the best-hit inclusions.
+    assert packed["tokens_used"] == _hit_tokens(packed)
+    assert sum(packed["tokens_used"].values()) > 8
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_search_token_budget_validation(client: AsyncClient):
+    """`token_budget` must be a positive integer when given."""
+    ids = await _seed_search_data()
+    token = await login(client, "test@example.com", "devpassword123")
+    response = await client.get(
+        f"/api/v1/chatgroups/{ids['chatgroup_id']}/search",
+        params={"q": "hiking", "token_budget": 0},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+
+
+async def test_search_llm_memory_ratio_uses_decision_model(client: AsyncClient):
+    """With `use_llm_memory_ratio` the ratio comes from one decision-model choice
+    question: the answer's probabilities are the distribution (renormalized, missing
+    types at zero) and drive the per-type packing."""
+    ids = await _seed_search_data(use_llm_memory_ratio=True)
+    calls: list[dict[str, Any]] = []
+    with _fake_provider(ratio_probabilities={"message": 4.0, "topic": 1.0}, calls=calls):
+        assert (await client.post("/admin/batch/trigger")).status_code == 200
+        assert (await client.post("/admin/batch/trigger")).status_code == 200
+        calls.clear()  # salience scoring is done; what follows is the search itself
+
+        token = await login(client, "test@example.com", "devpassword123")
+        data = await _search(client, token, ids["chatgroup_id"], q="hiking", token_budget=10)
+
+    ratio_calls = [call for call in calls if "memory_ratio" in call["questions"]]
+    assert len(ratio_calls) == 1
+    question = ratio_calls[0]["questions"]["memory_ratio"]
+    assert ratio_calls[0]["task"] == "memory_ratio"
+    assert ratio_calls[0]["state"]["query"] == "hiking"
+    assert question.type == "choice"
+    assert set(question.criteria) == {"message", "event", "topic", "fact"}
+
+    # 4:1 renormalizes to 0.8/0.2; event and fact get no share, so their hits are
+    # dropped even though both exist and match.
+    assert data["ratio_source"] == "decision"
+    assert data["memory_ratio"] == {"message": 0.8, "topic": 0.2, "event": 0.0, "fact": 0.0}
+    assert data["token_budget"] == 10
+    assert _type_counts(data) == {"message": 1, "topic": 1}
+    assert data["tokens_used"] == _hit_tokens(data)
+
+
+async def test_search_llm_memory_ratio_falls_back_to_config(client: AsyncClient):
+    """A failing or empty ratio decision falls back to the config ratio and the
+    search still succeeds."""
+    ids = await _seed_search_data(use_llm_memory_ratio=True)
+    for error, omit in [(True, False), (False, True)]:
+        with _fake_provider(error=error, omit_probabilities=omit):
+            assert (await client.post("/admin/batch/trigger")).status_code == 200
+            token = await login(client, "test@example.com", "devpassword123")
+            data = await _search(client, token, ids["chatgroup_id"], q="hiking")
+
+        assert data["ratio_source"] == "config"
+        assert data["memory_ratio"] == CONFIG_RATIO
+        assert len(data["hits"]) > 0
+
+
+async def test_search_uses_configured_memory_ratio_criteria(client: AsyncClient):
+    """The criteria of the ratio choice question come from the chatgroup's
+    `memory_ratio_criteria` prompts key: custom descriptions are passed through, and
+    types left out of the criteria are offered no share (their hits are dropped)."""
+    ids = await _seed_search_data(
+        use_llm_memory_ratio=True,
+        prompts={"memory_ratio_criteria": {"message": "Raw conversation words.", "topic": "Recurring themes."}},
+    )
+    calls: list[dict[str, Any]] = []
+    with _fake_provider(ratio_probabilities={"message": 3.0, "topic": 1.0}, calls=calls):
+        assert (await client.post("/admin/batch/trigger")).status_code == 200
+        assert (await client.post("/admin/batch/trigger")).status_code == 200
+        calls.clear()  # salience scoring is done; what follows is the search itself
+
+        token = await login(client, "test@example.com", "devpassword123")
+        data = await _search(client, token, ids["chatgroup_id"], q="hiking", token_budget=10)
+
+    ratio_calls = [call for call in calls if "memory_ratio" in call["questions"]]
+    assert len(ratio_calls) == 1
+    question = ratio_calls[0]["questions"]["memory_ratio"]
+    assert question.criteria == {"message": "Raw conversation words.", "topic": "Recurring themes."}
+
+    # The model can only spread probability over the offered criteria, so event and
+    # fact get no share and their hits are dropped even though both exist and match.
+    assert data["ratio_source"] == "decision"
+    assert data["memory_ratio"] == {"message": 0.75, "topic": 0.25, "event": 0.0, "fact": 0.0}
+    assert _type_counts(data) == {"message": 1, "topic": 1}
+    assert data["tokens_used"] == _hit_tokens(data)

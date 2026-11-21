@@ -383,6 +383,65 @@ GET /chats/{chat_id}/messages
 
 Returns messages in linked-list order. Supports cursor pagination.
 
+### Search
+
+#### Search a ChatGroup
+
+```
+GET /chatgroups/{chatgroup_id}/search?q=&k=&token_budget=
+```
+
+Hybrid (BM25 + vector) search across the messages, events, topics and facts of one
+ChatGroup. Requires authentication (any user token grants the ChatGroups the user
+owns).
+
+Parameters:
+
+| Parameter | Constraint | Default |
+|-----------|-----------|---------|
+| `q` | 1-512 chars, must contain a non-whitespace character | — |
+| `k` | 1-100 | 20 |
+| `token_budget` | >= 1 | the ChatGroup config's `token_budget` (2000) |
+
+The hits are ranked per ChatGroup `ranking_formula`, then packed into the token budget
+split per memory type by the memory ratio — the decision model for ChatGroups with
+`use_llm_memory_ratio` true, else the config ratio (see
+[`retrieval-system.md`](retrieval-system.md)).
+
+Response:
+
+```json
+{
+  "q": "hiking",
+  "hits": [
+    {
+      "type": "message",
+      "id": "uuid",
+      "text": "I went hiking in the mountains last weekend.",
+      "score": 0.63,
+      "vector_score": 1.0,
+      "bm25_score": 0.87,
+      "salience": 1.0,
+      "linked_count": 3,
+      "tokens": 8
+    }
+  ],
+  "token_budget": 120,
+  "tokens_used": {"message": 8, "event": 2, "topic": 2, "fact": 2},
+  "memory_ratio": {"message": 0.8, "event": 0.0, "topic": 0.2, "fact": 0.0},
+  "ratio_source": "decision"
+}
+```
+
+- `hits` is sorted by descending `score`, capped by `k`.
+- `tokens` is the BPE token estimate of the hit's text (tiktoken `cl100k_base`;
+  whitespace words when the tokenizer cannot load); only the text content counts
+  toward the budget.
+- `tokens_used` sums the tokens of the returned hits per type.
+- `ratio_source` is `"decision"` or `"config"`; the decision source's ratio sums to 1.
+- A type with a zero share yields no hits, except its single best hit when the share
+  is positive (best-hit rule).
+
 ### Batch operations (admin / debug)
 
 #### Trigger batch worker manually
@@ -449,6 +508,14 @@ Token estimates use a simple tokenizer heuristic; exactness is not critical beca
 
 ## Changelog
 
+- 2026-11-21: Documented the search endpoint (it predates this changelog entry): the
+  new `token_budget` query parameter (>= 1, config default 2000) packs the hits into
+  per-type shares of the memory ratio — decision-model probabilities for ChatGroups
+  with `use_llm_memory_ratio` true, else the config ratio. The response gained
+  `token_budget`, `tokens_used`, `memory_ratio` and `ratio_source`; each hit gained its
+  `tokens` estimate. Token counts are BPE estimates (tiktoken `cl100k_base`), and the
+  ratio question's criteria are configurable per ChatGroup via the
+  `memory_ratio_criteria` prompts key.
 - 2026-11-21: Messages gained `edited_at` (set only when `full_text` actually changes; a text change requeues every derived artifact, other edits touch nothing derived). Topics and facts renamed `last_edited_at` to `edited_at` (pre-1.0 API break).
 - 2026-11-21 (corrections, pre-1.0 API break): `edited_at` on messages, events, topics
   and facts records when the text was last written: set at creation (never null), bumped

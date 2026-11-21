@@ -58,15 +58,14 @@ defaults:
     model: "d3:4b"
 
 overrides:
-  # The salience override is a *decision task*: its provider must be a directly
+  # Decision tasks (salience, memory_ratio): their providers must be a directly
   # reachable ollama System One endpoint (not a chat model).
   salience:
     provider: "local-ollama"
     model: "d3:4b"
   memory_ratio:
-    provider: "remote-llm"
-    model: "gpt-4o-mini"
-    temperature: 0.1
+    provider: "local-ollama"
+    model: "d3:4b"
   event:
     provider: "remote-llm"
     model: "gpt-4o-mini"
@@ -129,7 +128,7 @@ class Provider:
     ) -> dict[str, DecisionAnswer]: ...
 ```
 
-- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`). The same overrides map serves chat tasks and decision tasks: the batch salience stage calls `decide(..., task="salience")`, which resolves the `salience` override with `defaults.decision` as fallback.
+- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`). The same overrides map serves chat tasks and decision tasks: the batch salience stage calls `decide(..., task="salience")` and the search ratio call uses `task="memory_ratio"`; both resolve their override with `defaults.decision` as fallback.
 - If no override exists for a task, the `defaults.llm`, `defaults.embedding` or `defaults.decision` config is used.
 - The adapter parses the YAML and resolves `api_key_env` once at startup. The file can be reloaded on SIGHUP or via an admin endpoint.
 
@@ -151,7 +150,7 @@ class Provider:
 | Template | Inputs |
 |----------|--------|
 | `salience` | message text, role, ChatGroup description. The template's `{kind}` is substituted with the element type; the question's criteria come from the chatgroup's `salience_rubric` prompts key (2-10 ordered levels, 5-level default). |
-| `memory_ratio` | message text, role, ChatGroup description. |
+| `memory_ratio` | ChatGroup description, search query (the decide state). A decision task: the template becomes the instructions of one choice question whose criteria come from the chatgroup's `memory_ratio_criteria` prompts key (labels fixed to the memory types, at least two); the answer's probabilities are the distribution. |
 | `event` | contiguous message block, existing event summary (if continuing). |
 | `topic_candidate` | existing topic summaries, new message, `max_topics_per_message`. |
 | `topic_update` | existing topic, new message, ChatGroup context. |
@@ -205,6 +204,11 @@ conversational text.
 
 ## Changelog
 
+- 2026-11-21: `memory_ratio` is a decision task (System One choice question over the
+  memory types, one `decide()` call per opted-in search; probabilities are the
+  distribution): its override must point at a directly reachable ollama endpoint, so
+  the example no longer routes it to a chat model. The question's criteria are
+  configurable per chatgroup via the `memory_ratio_criteria` prompts key.
 - 2026-07-11: Initial LLM provider design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: split `fact` task into `fact_candidate` and `fact_update`, split `topic` task into `topic_candidate` and `topic_update`.
 - 2026-11-15: Added `defaults.decision` and `Provider.decide()` for System One decision models (`/v1/systemone`): typed `choice`/`noul`/`score` questions, probability answers, direct-ollama routing only.

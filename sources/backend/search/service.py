@@ -1,8 +1,11 @@
 """Hybrid search service: merges ParadeDB BM25 matches with embedding cosine similarity.
 
 For each memory type (message, event, topic, fact) the service gathers up to
-`_CANDIDATE_LIMIT` candidates from each retrieval mode, collects both raw scores, then
-normalizes the channels and applies the chatgroup's ranking formula to return the top-k hits.
+`_CANDIDATE_LIMIT` candidates from each retrieval mode, collects both raw scores,
+normalizes the channels and applies the chatgroup's ranking formula. The ranked hits
+are then packed into the request's token budget, split per memory type by a ratio
+that comes from the decision model (chatgroups opting in via `use_llm_memory_ratio`)
+or from the chatgroup config (see `backend.search.budget`).
 """
 
 import uuid
@@ -13,21 +16,35 @@ from backend.chatgroup.schemas import ChatGroupInternal
 from backend.database import get_async_sessionmaker
 from backend.event.models import EventDO, EventMessageLinkDO
 from backend.fact.models import FactDO, FactMessageLinkDO
-from backend.llm.provider import Provider
+from backend.llm.provider import ChoiceQuestion, DecisionError, Provider
 from backend.message.models import MessageDO
-from backend.search.schemas import SearchHit
+from backend.search.budget import (
+    MEMORY_TYPES,
+    estimate_tokens,
+    normalize_probabilities,
+    pack_token_budget,
+)
+from backend.search.schemas import SearchHit, SearchResponse
 from backend.search.scoring import clamp_unit, evaluate_ranking_formula, normalize_bm25
 from backend.topic.models import TopicDO, TopicMessageLinkDO
+from loguru import logger
 from paradedb.sqlalchemy.search import parse
 from paradedb.sqlalchemy.vector import cosine_distance
 from sqlalchemy import Float, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Candidates fetched per memory type and per retrieval mode before formula ranking.
-_CANDIDATE_LIMIT = 20
+_CANDIDATE_LIMIT = 30
 
 # Salience used by the formula when the object has no score or the chatgroup ignores salience.
 _NEUTRAL_SALIENCE = 1.0
+
+# Decision task resolving the memory-ratio override in providers.yaml, and the name
+# of the single choice question asked in the ratio decide() call. The decision model
+# is kept loaded between searches so the opt-in costs one call, not one model load.
+_MEMORY_RATIO_TASK = "memory_ratio"
+_MEMORY_RATIO_QUESTION = "memory_ratio"
+_MEMORY_RATIO_KEEP_ALIVE = "10m"
 
 
 # ParadeDB's query-string parser treats free text as Lucene syntax: an unbalanced quote
@@ -43,10 +60,20 @@ def _quote_bm25_tokens(q: str) -> str:
     return " ".join(quote(token) for token in q.split())
 
 
-async def search_chatgroup(chatgroup: ChatGroupInternal, q: str, k: int) -> list[SearchHit]:
-    """Hybrid-search one chatgroup and return the k best hits across all memory types."""
+async def search_chatgroup(chatgroup: ChatGroupInternal, q: str, k: int, token_budget: int) -> SearchResponse:
+    """Hybrid-search one chatgroup, pack the hits into `token_budget` split by the
+    memory ratio, and return the k best packed hits."""
+    memory_ratio, ratio_source = await _memory_ratio(chatgroup, q)
     if not q.strip():
-        return []
+        empty_used = dict.fromkeys(MEMORY_TYPES, 0)
+        return SearchResponse(
+            q=q,
+            hits=[],
+            token_budget=token_budget,
+            tokens_used=empty_used,
+            memory_ratio=memory_ratio,
+            ratio_source=ratio_source,
+        )
     # The semantic channel embeds the raw query; the lexical channel runs it through
     # ParadeDB's query-string parser, which needs the tokens quoted as literals.
     query_vec = (await Provider().embed([q]))[0]
@@ -62,8 +89,51 @@ async def search_chatgroup(chatgroup: ChatGroupInternal, q: str, k: int) -> list
     # then rank: the channels are only comparable once both live in 0..1.
     bm25_max = max((candidate.bm25_score for candidate in candidates), default=0.0)
     hits = [_rank_hit(chatgroup, candidate, bm25_max) for candidate in candidates]
-    hits.sort(key=lambda hit: hit.score, reverse=True)
-    return hits[:k]
+    packed, tokens_used = pack_token_budget(hits, token_budget, memory_ratio, k)
+    return SearchResponse(
+        q=q,
+        hits=packed,
+        token_budget=token_budget,
+        tokens_used=tokens_used,
+        memory_ratio=memory_ratio,
+        ratio_source=ratio_source,
+    )
+
+
+async def _memory_ratio(chatgroup: ChatGroupInternal, q: str) -> tuple[dict[str, float], str]:
+    """Resolve the per-type memory ratio for one search and report its source.
+
+    Chatgroups with `use_llm_memory_ratio` true ask the decision model: one decide()
+    call whose state carries the chatgroup description and the query, with a single
+    choice question whose criteria are the memory types the chatgroup offers (the
+    `memory_ratio_criteria` prompts key) — the answer's native probabilities are
+    the distribution, renormalized to 1. Any failure (decision error, absent
+    probabilities, nothing usable in them) falls back to the config ratio, which is
+    used verbatim otherwise (no renormalization).
+    """
+    config_ratio = chatgroup.config.memory_ratio.model_dump()
+    if not chatgroup.config.use_llm_memory_ratio:
+        return config_ratio, "config"
+    try:
+        answers = await Provider().decide(
+            {"chatgroup": chatgroup.description, "query": q},
+            {
+                _MEMORY_RATIO_QUESTION: ChoiceQuestion(
+                    instructions=chatgroup.prompts.memory_ratio,
+                    criteria=chatgroup.prompts.memory_ratio_criteria,
+                )
+            },
+            task=_MEMORY_RATIO_TASK,
+            keep_alive=_MEMORY_RATIO_KEEP_ALIVE,
+        )
+        probabilities = answers[_MEMORY_RATIO_QUESTION].probabilities
+        ratio = normalize_probabilities(probabilities) if probabilities else None
+    except DecisionError:
+        ratio = None
+    if ratio is None:
+        logger.warning("memory-ratio decision failed; falling back to the chatgroup config ratio")
+        return config_ratio, "config"
+    return ratio, "decision"
 
 
 def _rank_hit(chatgroup: ChatGroupInternal, candidate: SearchHit, bm25_max: float) -> SearchHit:
@@ -277,6 +347,7 @@ def _build_hits(
                 bm25_score=bm25_scores.get(object_id, 0.0),
                 salience=float(salience),
                 linked_count=linked_counts.get(object_id, 0),
+                tokens=estimate_tokens(obj.full_text),
             )
         )
     return hits

@@ -374,3 +374,65 @@ nulls normalized to false) and docs:
 Verification: 97 unit tests (+1 message identity test, −1 obsolete) green, lint,
 typecheck, real-provider integration test green (event block now = block size, 10/round),
 migration `0006` down/up round-trip on the dev DB.
+
+### Phase D — Issue 002 (done 2026-11-21)
+
+Search packs its hits into a client-chosen token budget, split per memory type by a
+configurable ratio. Verified: `just fmt` / `lint` / `typecheck`, 112 unit tests + the
+real-provider integration test green (the integration test now also runs one real d3
+memory-ratio decision and asserts the budget bookkeeping; 234s).
+
+- `backend/search/budget.py` (new) — `MEMORY_TYPES` (packing order fact, topic, event,
+  message), `RATIO_CRITERIA` (choice-question criteria labels + descriptions),
+  `estimate_tokens` (whitespace split), `normalize_probabilities` (drop unknown labels,
+  clamp negatives, missing labels 0, renormalize to 1; None on empty/zero sum) and
+  `pack_token_budget` (per-type greedy in score order, stop at first misfit, best-hit
+  inclusion for positive shares, global re-sort + `k` cap; `tokens_used` over the
+  returned hits).
+- `backend/search/service.py` — `_memory_ratio()` resolves the ratio: config verbatim,
+  or one `decide(task="memory_ratio")` choice question (state: chatgroup description +
+  query; criteria: the four types) when `use_llm_memory_ratio` is true, with DecisionError
+  / absent-probability / zero-sum fallback to config; `search_chatgroup` returns the
+  full `SearchResponse` now.
+- `backend/search/schemas.py` — `SearchHit.tokens`; `SearchResponse` gains
+  `token_budget`, `tokens_used`, `memory_ratio`, `ratio_source`
+  (Literal["config", "decision"]).
+- `backend/search/apis.py` — `token_budget: int | None = Query(ge=1)`, falling back to
+  `chatgroup.config.token_budget`.
+- `providers.yaml` — `memory_ratio` override moved from the gomodel chat model to
+  `local-ollama` / `d3:4b` (gomodel cannot forward `/v1/systemone`).
+- Tests — `test_budget.py` (11 pure unit tests: estimation, renormalization,
+  per-type packing, best-hit rule, zero shares, global sort + k, bookkeeping);
+  `test_search_apis.py`: the fake decide answers the choice question with recorded
+  calls (fixture refactored into a reusable `_fake_provider` contextmanager) + 4 new
+  endpoint tests (packing with budget 8 exercising the best-hit rule, validation 422,
+  decision ratio with 4:1 probabilities renormalizing to 0.8/0.2 and dropping the
+  event/fact hits, config fallback on decision error and on absent probabilities);
+  the integration test flips the demo chatgroup to `use_llm_memory_ratio` and asserts
+  the real distribution (four types, sums to 1) and the packing invariants.
+- Docs — `retrieval-system.md` (§2 decision-model ratio as built, §7 packing rules +
+  best-hit deviation, §8 response, perf target, BM25 `full_text` correction +
+  changelog), `api-contract.md` (search endpoint + response example + changelog),
+  `llm-provider.md` (decision-task override, template-inputs row, changelog),
+  `data-model.md` (config/prompts rows). Issue 002 flipped to DONE.
+
+### Phase D revision (2026-11-21, same day)
+
+Two refinements after the Phase D review, both verified (fmt / lint / typecheck, 115
+unit tests, real-provider integration green):
+
+- **BPE token estimates**: `estimate_tokens` counts tiktoken `cl100k_base` pieces
+  (the local tokenizer LangChain's text splitters use; already in the tree via
+  langchain-openai, now a direct dependency) instead of whitespace words. The
+  encoding data is fetched once and cached; when it cannot load (offline first boot),
+  estimation degrades to whitespace word counts rather than failing the search. The
+  packing tests now pass explicit token counts, keeping them estimator-agnostic; the
+  estimation tests pin cl100k_base exacts plus the fallback.
+- **Configurable ratio criteria**: the choice question's criteria moved from the
+  `RATIO_CRITERIA` constant in `budget.py` to the chatgroup prompts, mirroring
+  `salience_rubric`: `ChatGroupPrompts.memory_ratio_criteria` (default
+  `DEFAULT_MEMORY_RATIO_CRITERIA` in `chatgroup/schemas.py`), keys validated to be
+  memory types with at least two entries (422 otherwise). Labels stay fixed to the
+  four types — the model's probability keys and the packing shares are looked up by
+  them — while chatgroups reword the descriptions; a type left out of the criteria
+  gets no share. No migration (prompts JSONB, pydantic defaults fill on read).
