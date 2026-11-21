@@ -4,7 +4,7 @@ services:
   # Login: system "PostgreSQL", server "vistui_postgres" (dev) or "vistui_postgres_test",
   # username/password/database "vistui". Vector columns render as text arrays.
   vistui_adminer:
-    image: adminer:4.8.1
+    image: adminer:6.3.0
     container_name: vistui_adminer
     restart: on-failure
     ports:
