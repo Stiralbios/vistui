@@ -481,7 +481,7 @@ class FactPipeline:
             if chatgroup is None:
                 return False
 
-            existing_facts = await cls._find_similar_facts(session, chatgroup.id, message.embedding, k=5)
+            existing_facts = await cls._find_similar_facts(session, chatgroup.id, message.embedding, k=10)
             facts_text = "\n".join(f"- {fact.id}: {fact.full_text}" for fact in existing_facts) or "None"
             user_name, assistant_name = _participant_names(chatgroup)
             speaker = _speaker_name(message, user_name, assistant_name)
@@ -494,7 +494,7 @@ class FactPipeline:
                             message=message.full_text,
                             speaker=speaker,
                             facts=facts_text,
-                            max_facts=5,
+                            max_facts=10,
                             user_name=user_name,
                             assistant_name=assistant_name,
                         ),
