@@ -121,6 +121,8 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `memory_ratio` | Category distribution used verbatim when the decision-model ratio is disabled or unusable. |
 | `use_llm_memory_ratio` | If `true`, ask the decision model for the ratio on every search. If `false`, use `memory_ratio`. |
 | `protected_message_count` | Number of most recent messages never added to facts/events/topics until newer messages push them out of the window. Default follows the deployment's `VISTUI_PROTECTED_MESSAGE_COUNT` setting (10). |
+| `user_name` | Display name of the conversation's human participant, substituted into the topic/fact/event prompts so statements are attributed to the right speaker. `null` falls back to "the user". |
+| `assistant_name` | Display name of the AI participant, same substitution. `null` falls back to "the assistant". |
 | `max_facts_per_message` | Maximum number of facts a single message can create or update (default 5). |
 | `max_topics_per_message` | Maximum number of topics a single message can create or update (default 5). |
 | `batch_inactivity_seconds` | Seconds of inactivity before the batch worker starts. |
@@ -137,10 +139,10 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `event_boundary` | Instructions of the per-message event boundary choice question (decision task): how the message relates to the chat's last event. |
 | `event_boundary_criteria` | Criteria of the boundary question — keys ⊆ `extend`/`new`/`mixed` (at least two), values their descriptions. |
 | `event_summary` | Rebuild an event's summary from its full member list; must contain the `{messages}` placeholder. |
-| `topic_candidate` | Select up to `max_topics_per_message` existing topics to update (returning the new summary) or decide to create new topics. |
-| `fact_candidate` | Select up to `max_facts_per_message` existing facts to update (returning the new summary) or decide to create a new fact. |
+| `topic_candidate` | Maintain the chatgroup's topics — titled, additive running summaries of recurring themes; an update returns the complete new text (the body only grows: earlier lines kept, new ones appended; the title can be reworded). |
+| `fact_candidate` | Maintain the chatgroup's facts — titled current-state snippets; an update fully replaces the body (the title can be reworded), and a changed truth replaces the old fact instead of coexisting with it. |
 
-At creation, `prompts`, `ranking_formula`, and `config` are copied from system defaults unless explicitly supplied.
+At creation, `prompts`, `ranking_formula`, and `config` are copied from system defaults unless explicitly supplied. The `topic_candidate`, `fact_candidate` and `event_summary` templates are formatted with the chatgroup's participant names (`config.user_name` / `config.assistant_name`, generic fallbacks when unset) and each message is attributed to its speaker, so statements are credited to whoever made them.
 
 ### Chat
 
@@ -231,7 +233,7 @@ and its embedding/salience cleared for regeneration, exactly like a topic/fact u
 
 ### Topic
 
-A summary of a recurring theme across non-contiguous messages in a ChatGroup.
+A short title followed by the additive running summary of a recurring theme across non-contiguous messages in a ChatGroup. The body only grows — updates keep earlier lines and append new ones — so the theme's evolution stays visible inside it; the title can be reworded.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -249,7 +251,7 @@ A Topic links to non-contiguous Messages via `topic_message_links`. When updated
 
 ### Fact
 
-A small, persistent fact to remember across the ChatGroup.
+A short title followed by a small body describing the current state of one specific thing about the user or the world. The body holds no history: a changed truth fully replaces it (the title can be reworded), and two conflicting facts never coexist (earlier states stay visible in events and topics).
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -324,7 +326,9 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
   column; topic/fact clients no longer supply it).
 - 2026-07-11: Initial data model derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: memory_ratio is now a config default with optional LLM override, split fact prompts into `fact_candidate` and `fact_update`, split topic prompts into `topic_candidate` and `topic_update`, added embedding/salience as prerequisite batch pipelines.
-- 2026-12-01: Removed the `topic_update`/`fact_update` prompts and their associated config (`topic_update_threshold`, `fact_update_threshold`, `fact_history_count`); `topic_candidate`/`fact_candidate` now directly return create/update/skip actions.
+- 2026-11-22: Removed the `topic_update`/`fact_update` prompts and their associated config (`topic_update_threshold`, `fact_update_threshold`, `fact_history_count`); `topic_candidate`/`fact_candidate` now directly return create/update/skip actions.
+- 2026-11-22: Topic/fact semantics made explicit in the default prompts: topics are titled, additive running summaries (updates return the complete new text: the body only grows, the title can be reworded), facts are titled current-state snippets (updates fully replace the body, conflicting facts never coexist).
+- 2026-11-22: The config gained `user_name`/`assistant_name` (display names of the conversation's participants, substituted into the topic/fact/event prompts with generic fallbacks) so statements are attributed to their author instead of generic "the user"/"the AI" labels. The candidate prompt templates are validated as format templates on write.
 
 - 2026-11-21: `chatgroup.ranking_formula` stores the name of a formula defined in
   the settings file's `ranking_formulas` section (migration `0007` rewrote the

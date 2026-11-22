@@ -37,6 +37,11 @@ class ChatGroupConfig(BaseModel):
     # messages push them out of the window. The default follows the deployment's
     # VISTUI_PROTECTED_MESSAGE_COUNT setting; each chatgroup can override it.
     protected_message_count: int = Field(default_factory=lambda: AppSettings().VISTUI_PROTECTED_MESSAGE_COUNT)
+    # Display names of the conversation's two participants, substituted into the
+    # topic/fact/event prompts so statements are attributed to the right speaker.
+    # None falls back to the generic "the user" / "the assistant".
+    user_name: str | None = Field(default=None, max_length=100)
+    assistant_name: str | None = Field(default=None, max_length=100)
     max_facts_per_message: int = 5
     max_topics_per_message: int = 5
     batch_inactivity_seconds: int = 3600
@@ -106,6 +111,28 @@ class ChatGroupPrompts(BaseModel):
             value.format(messages="sample")
         except (KeyError, IndexError, ValueError) as exc:
             raise ValueError(f"event_summary is not a valid format template: {exc}") from exc
+        return value
+
+    @field_validator("topic_candidate")
+    @classmethod
+    def validate_topic_candidate(cls, value: str) -> str:
+        """The template is formatted with the pipeline's fixed kwargs; a stray or
+        unknown placeholder would fail every message."""
+        try:
+            value.format(message="", speaker="", topics="", max_topics="", user_name="", assistant_name="")
+        except (KeyError, IndexError, ValueError) as exc:
+            raise ValueError(f"topic_candidate is not a valid format template: {exc}") from exc
+        return value
+
+    @field_validator("fact_candidate")
+    @classmethod
+    def validate_fact_candidate(cls, value: str) -> str:
+        """The template is formatted with the pipeline's fixed kwargs; a stray or
+        unknown placeholder would fail every message."""
+        try:
+            value.format(message="", speaker="", facts="", max_facts="", user_name="", assistant_name="")
+        except (KeyError, IndexError, ValueError) as exc:
+            raise ValueError(f"fact_candidate is not a valid format template: {exc}") from exc
         return value
 
 

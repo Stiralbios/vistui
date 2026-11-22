@@ -29,3 +29,14 @@ def test_decision_prompts_are_usable_question_material():
     assert len(prompts.DEFAULT_SALIENCE_RUBRIC) >= 2
     assert "{messages}" in prompts.EVENT_SUMMARY
     prompts.EVENT_SUMMARY.format(messages="sample")  # the template must survive formatting
+
+
+def test_candidate_prompts_are_format_safe():
+    """The candidate templates are formatted with the pipelines' fixed kwargs
+    (speaker + participant names + the message and candidate list)."""
+    prompts.TOPIC_CANDIDATE.format(
+        message="m", speaker="s", topics="t", max_topics=1, user_name="u", assistant_name="a"
+    )
+    prompts.FACT_CANDIDATE.format(message="m", speaker="s", facts="f", max_facts=1, user_name="u", assistant_name="a")
+    assert "New message from {speaker}" in prompts.TOPIC_CANDIDATE
+    assert "New message from {speaker}" in prompts.FACT_CANDIDATE

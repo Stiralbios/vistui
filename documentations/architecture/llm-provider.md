@@ -157,9 +157,9 @@ class Provider:
 | `salience` | message text, role, ChatGroup description. The template's `{kind}` is substituted with the element type; the question's criteria come from the chatgroup's `salience_rubric` prompts key (2-10 ordered levels, 5-level default). |
 | `memory_ratio` | ChatGroup description, search query (the decide state). A decision task: the template becomes the instructions of one choice question whose criteria come from the chatgroup's `memory_ratio_criteria` prompts key (labels fixed to the memory types, at least two); the answer's probabilities are the distribution. |
 | `event_boundary` | ChatGroup description, the chat's last event (summary, time range), the new message (role, text, created_at). A decision task: the template becomes the instructions of one choice question whose criteria come from the chatgroup's `event_boundary_criteria` prompts key (extend / new / mixed); the highest-probability criterion wins. |
-| `event_summary` | the event's full member list, oldest first (`{messages}`). Always rebuilt from the sources, never from the previous summary. |
-| `topic_candidate` | existing topic summaries, new message, `max_topics_per_message`. |
-| `fact_candidate` | existing fact summaries, new message, `max_facts_per_message`. |
+| `event_summary` | the event's full member list, oldest first (`{messages}`), each message attributed to its speaker using the chatgroup's participant names. Always rebuilt from the sources, never from the previous summary. |
+| `topic_candidate` | existing topic summaries, the new message attributed to its speaker, `max_topics_per_message`, the participant names (`config.user_name`/`config.assistant_name`). |
+| `fact_candidate` | existing fact summaries, the new message attributed to its speaker, `max_facts_per_message`, the participant names. |
 
 ## Decision call semantics
 
@@ -222,7 +222,8 @@ conversational text.
   configurable per chatgroup via the `memory_ratio_criteria` prompts key.
 - 2026-07-11: Initial LLM provider design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: split `fact` task into `fact_candidate` and `fact_update`, split `topic` task into `topic_candidate` and `topic_update`.
-- 2026-12-01: Removed the separate `topic_update` and `fact_update` tasks; candidate prompts now directly emit the new/updated summary, so a single LLM call creates or updates topics and facts.
+- 2026-11-22: Removed the separate `topic_update` and `fact_update` tasks; candidate prompts now directly emit the new/updated summary, so a single LLM call creates or updates topics and facts.
+- 2026-11-22: Statements are attributed to their author: the candidate prompts name both participants (chatgroup config `user_name`/`assistant_name`, generic fallbacks) and attribute each message to its speaker; event summary member lists name each message's speaker too.
 - 2026-11-15: Added `defaults.decision` and `Provider.decide()` for System One decision models (`/v1/systemone`): typed `choice`/`noul`/`score` questions, probability answers, direct-ollama routing only.
 - 2026-11-15: Salience stages switched from batched calls (chunked at 5 questions) to
   element-per-element scoring — one `decide()` call per message / memory object.

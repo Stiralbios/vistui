@@ -43,10 +43,10 @@ def _fake_chat_model():
             messages = input
             prompt = " ".join(getattr(m, "content", str(m)) for m in messages)
             lowered = prompt.lower()
-            if "topics" in lowered:
-                content = '{"actions": [{"action": "create", "summary": "Demo topic"}]}'
-            elif "facts" in lowered:
+            if "fact_id" in lowered:
                 content = '{"actions": [{"action": "create", "summary": "Demo fact"}]}'
+            elif "topic_id" in lowered:
+                content = '{"actions": [{"action": "create", "summary": "Demo topic"}]}'
             elif "event" in lowered:
                 content = '{"summary": "Demo event"}'
             else:

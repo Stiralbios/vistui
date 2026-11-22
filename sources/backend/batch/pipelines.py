@@ -20,7 +20,7 @@ from backend.fact.models import FactDO, FactMessageLinkDO
 from backend.llm import Provider
 from backend.llm.prompts import FACT_CANDIDATE, TOPIC_CANDIDATE
 from backend.llm.provider import ChoiceQuestion
-from backend.message.constants import ProcessingStatus
+from backend.message.constants import MessageRole, ProcessingStatus
 from backend.message.models import MessageDO
 from backend.topic.models import TopicDO, TopicMessageLinkDO
 from loguru import logger
@@ -72,6 +72,19 @@ async def _process_waiting_messages(
     if handled:
         logger.info(f"Stage {state_key} processed {handled} message(s)")
     return handled
+
+
+def _participant_names(chatgroup: ChatGroupDO) -> tuple[str, str]:
+    """Resolve the display names of the two participants from the chatgroup config;
+    unset names fall back to the generic ones."""
+    user_name = chatgroup.config.get("user_name") or "the user"
+    assistant_name = chatgroup.config.get("assistant_name") or "the assistant"
+    return user_name, assistant_name
+
+
+def _speaker_name(message: MessageDO, user_name: str, assistant_name: str) -> str:
+    """Name of the participant who wrote the message (system messages speak as the AI)."""
+    return assistant_name if message.role == MessageRole.ASSISTANT else user_name
 
 
 def _extract_actions(response: object, plural_key: str) -> list[dict]:
@@ -250,11 +263,20 @@ class EventPipeline:
     @staticmethod
     async def _summarize(provider: Provider, chatgroup: ChatGroupDO, members: list[MessageDO]) -> str:
         """Rebuild the event summary from the full member list through the chatgroup's
-        event_summary template ({messages} substituted). A response without a summary
+        event_summary template ({messages} substituted, each message attributed to its
+        speaker by the chatgroup's participant names). A response without a summary
         is a failure, so the message is retried."""
         template = chatgroup.prompts.get("event_summary") or ChatGroupPrompts().event_summary
+        user_name, assistant_name = _participant_names(chatgroup)
         response = await provider.chat_json(
-            [{"role": "user", "content": template.format(messages=EventPipeline._format_messages(members))}],
+            [
+                {
+                    "role": "user",
+                    "content": template.format(
+                        messages=EventPipeline._format_messages(members, user_name, assistant_name)
+                    ),
+                }
+            ],
             task=EventPipeline.SUMMARY_TASK,
         )
         summary = response.get("summary") if isinstance(response, dict) else None
@@ -263,12 +285,14 @@ class EventPipeline:
         return summary.strip()
 
     @staticmethod
-    def _format_messages(messages: list[MessageDO]) -> str:
-        """Render messages as a bullet list, oldest first, so the summary follows the
-        conversation's order."""
+    def _format_messages(messages: list[MessageDO], user_name: str, assistant_name: str) -> str:
+        """Render messages as a bullet list, oldest first, each attributed to the
+        participant who wrote it, so the summary follows the conversation's order
+        and names its speakers."""
         lines = []
         for message in messages:
-            lines.append(f"- role: {message.role} | text: {message.full_text}")
+            speaker = _speaker_name(message, user_name, assistant_name)
+            lines.append(f"- {speaker}: {message.full_text}")
         return "\n".join(lines)
 
 
@@ -296,12 +320,14 @@ class TopicPipeline:
             if message is None or message.processing_state.get("topic") != ProcessingStatus.WAITING:
                 return False
 
-            chatgroup_id = await cls._chatgroup_id(session, message.chat_id)
-            if chatgroup_id is None:
+            chatgroup = await cls._chatgroup(session, message.chat_id)
+            if chatgroup is None:
                 return False
 
-            existing_topics = await cls._find_similar_topics(session, chatgroup_id, message.embedding, k=5)
+            existing_topics = await cls._find_similar_topics(session, chatgroup.id, message.embedding, k=5)
             topics_text = "\n".join(f"- {topic.id}: {topic.full_text}" for topic in existing_topics) or "None"
+            user_name, assistant_name = _participant_names(chatgroup)
+            speaker = _speaker_name(message, user_name, assistant_name)
 
             response = await provider.chat_json(
                 [
@@ -309,8 +335,11 @@ class TopicPipeline:
                         "role": "user",
                         "content": TOPIC_CANDIDATE.format(
                             message=message.full_text,
+                            speaker=speaker,
                             topics=topics_text,
                             max_topics=5,
+                            user_name=user_name,
+                            assistant_name=assistant_name,
                         ),
                     }
                 ],
@@ -319,16 +348,17 @@ class TopicPipeline:
 
             actions = _extract_actions(response, "topics")
             for action in actions:
-                await cls._apply_action(session, chatgroup_id, message, action, existing_topics)
+                await cls._apply_action(session, chatgroup.id, message, action, existing_topics)
 
             message.processing_state = {**message.processing_state, "topic": ProcessingStatus.DONE}
             return True
 
     @staticmethod
-    async def _chatgroup_id(session: AsyncSession, chat_id: uuid.UUID) -> uuid.UUID | None:
-        """Resolve the chatgroup a chat belongs to (topics are scoped per chatgroup)."""
+    async def _chatgroup(session: AsyncSession, chat_id: uuid.UUID) -> ChatGroupDO | None:
+        """Resolve the chatgroup a chat belongs to (topics are scoped per chatgroup;
+        its config carries the participant names)."""
         chat = await session.get(ChatDO, chat_id)
-        return chat.chatgroup_id if chat else None
+        return await session.get(ChatGroupDO, chat.chatgroup_id) if chat else None
 
     @staticmethod
     async def _find_similar_topics(
@@ -421,12 +451,14 @@ class FactPipeline:
             if message is None or message.processing_state.get("fact") != ProcessingStatus.WAITING:
                 return False
 
-            chatgroup_id = await cls._chatgroup_id(session, message.chat_id)
-            if chatgroup_id is None:
+            chatgroup = await cls._chatgroup(session, message.chat_id)
+            if chatgroup is None:
                 return False
 
-            existing_facts = await cls._find_similar_facts(session, chatgroup_id, message.embedding, k=5)
+            existing_facts = await cls._find_similar_facts(session, chatgroup.id, message.embedding, k=5)
             facts_text = "\n".join(f"- {fact.id}: {fact.full_text}" for fact in existing_facts) or "None"
+            user_name, assistant_name = _participant_names(chatgroup)
+            speaker = _speaker_name(message, user_name, assistant_name)
 
             response = await provider.chat_json(
                 [
@@ -434,8 +466,11 @@ class FactPipeline:
                         "role": "user",
                         "content": FACT_CANDIDATE.format(
                             message=message.full_text,
+                            speaker=speaker,
                             facts=facts_text,
                             max_facts=5,
+                            user_name=user_name,
+                            assistant_name=assistant_name,
                         ),
                     }
                 ],
@@ -444,16 +479,17 @@ class FactPipeline:
 
             actions = _extract_actions(response, "facts")
             for action in actions:
-                await cls._apply_action(session, chatgroup_id, message, action, existing_facts)
+                await cls._apply_action(session, chatgroup.id, message, action, existing_facts)
 
             message.processing_state = {**message.processing_state, "fact": ProcessingStatus.DONE}
             return True
 
     @staticmethod
-    async def _chatgroup_id(session: AsyncSession, chat_id: uuid.UUID) -> uuid.UUID | None:
-        """Resolve the chatgroup a chat belongs to (facts are scoped per chatgroup)."""
+    async def _chatgroup(session: AsyncSession, chat_id: uuid.UUID) -> ChatGroupDO | None:
+        """Resolve the chatgroup a chat belongs to (facts are scoped per chatgroup;
+        its config carries the participant names)."""
         chat = await session.get(ChatDO, chat_id)
-        return chat.chatgroup_id if chat else None
+        return await session.get(ChatGroupDO, chat.chatgroup_id) if chat else None
 
     @staticmethod
     async def _find_similar_facts(

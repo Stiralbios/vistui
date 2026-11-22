@@ -54,9 +54,9 @@ def _fake_chat_model(
     calls: list[dict] | None = None,
 ):
     """Return a LangChain ChatOpenAI whose ainvoke returns deterministic JSON per
-    task, detected from the prompt content (topic and fact candidate prompts, event
-    summary prompt), optionally recording each call. Event answers are consumed from
-    `event_contents` in order, one per summary call."""
+    task, detected from the prompt content (the candidate prompts' fact_id/topic_id
+    action keys, event summary prompt), optionally recording each call. Event answers
+    are consumed from `event_contents` in order, one per summary call."""
 
     class FakeChatModel(ChatOpenAI):
         def __init__(self, **kwargs):
@@ -69,10 +69,10 @@ def _fake_chat_model(
             messages = input
             prompt = " ".join(getattr(m, "content", str(m)) for m in messages)
             lowered = prompt.lower()
-            if "topics" in lowered:
-                content = topic_content
-            elif "facts" in lowered:
+            if "fact_id" in lowered:
                 content = '{"actions": [{"action": "create", "summary": "Demo fact"}]}'
+            elif "topic_id" in lowered:
+                content = topic_content
             elif "event" in lowered:
                 content = (event_contents or ['{"summary": "Demo event summary"}']).pop(0)
             else:
@@ -117,16 +117,23 @@ def fake_langchain_client():
 
 
 async def _make_test_chat(
-    session, protected_message_count: int = 0, use_salience: bool = True, prompts: dict | None = None
+    session,
+    protected_message_count: int = 0,
+    use_salience: bool = True,
+    prompts: dict | None = None,
+    config: dict | None = None,
 ):
     """Create a test chatgroup + chat. The protected window defaults to 0 so test
     chats consolidate fully unless a test opts into a window explicitly; `prompts`
-    overrides individual prompt keys on top of the defaults."""
+    overrides individual prompt keys and `config` individual config keys on top of
+    the defaults."""
     user = await session.scalar(select(UserDO).where(UserDO.email == "test@example.com"))
     assert user is not None
-    config = ChatGroupConfig().model_dump()
-    config["protected_message_count"] = protected_message_count
-    config["use_salience"] = use_salience
+    config_data = ChatGroupConfig().model_dump()
+    config_data["protected_message_count"] = protected_message_count
+    config_data["use_salience"] = use_salience
+    if config:
+        config_data.update(config)
     prompts_data = ChatGroupPrompts().model_dump()
     if prompts:
         prompts_data.update(prompts)
@@ -134,7 +141,7 @@ async def _make_test_chat(
         id=uuid.uuid4(),
         user_id=user.id,
         name="Test ChatGroup",
-        config=config,
+        config=config_data,
         prompts=prompts_data,
         ranking_formula="default",
     )
@@ -838,6 +845,82 @@ async def test_event_summary_response_without_summary_fails():
         assert updated.processing_state["retry_count"] == 1
         events = list((await session.execute(select(EventDO).where(EventDO.chat_id == chat.id))).scalars().all())
         assert events == []
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_topic_pipeline_attributes_speaker_and_participant_names():
+    """The candidate prompt tells the model who is who and who is speaking: the
+    chatgroup's participant names introduce both participants, and the new message is
+    attributed to the participant who wrote it."""
+    chat_calls: list[dict] = []
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session, config={"user_name": "Aurélien", "assistant_name": "Glas"})
+        await _add_message(session, chat.id, "I used to ride horses", role=MessageRole.ASSISTANT)
+
+    with patch("backend.llm.provider.ChatOpenAI", _fake_chat_model(calls=chat_calls)):
+        assert await TopicPipeline.run_round() == 1
+
+    prompt = " ".join(chat_calls[0]["prompt"].split())
+    assert "Aurélien (the human)" in prompt
+    assert "Glas (the AI)" in prompt
+    assert "New message from Glas:" in prompt
+    assert "I used to ride horses" in prompt
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_fact_pipeline_attributes_speaker_and_participant_names():
+    """Same attribution contract on the fact side, with a message from the human."""
+    chat_calls: list[dict] = []
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session, config={"user_name": "Aurélien", "assistant_name": "Glas"})
+        await _add_message(session, chat.id, "My mom has cancer")
+
+    with patch("backend.llm.provider.ChatOpenAI", _fake_chat_model(calls=chat_calls)):
+        assert await FactPipeline.run_round() == 1
+
+    prompt = " ".join(chat_calls[0]["prompt"].split())
+    assert "Aurélien (the human)" in prompt
+    assert "Glas (the AI)" in prompt
+    assert "New message from Aurélien:" in prompt
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_candidate_prompts_fall_back_to_generic_participant_names():
+    """Chatgroups without configured participant names get the generic ones: the
+    prompt still names the message's speaker, so statements stay attributed."""
+    chat_calls: list[dict] = []
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session)
+        await _add_message(session, chat.id, "Generic names message")
+
+    with patch("backend.llm.provider.ChatOpenAI", _fake_chat_model(calls=chat_calls)):
+        assert await TopicPipeline.run_round() == 1
+
+    prompt = " ".join(chat_calls[0]["prompt"].split())
+    assert "the user (the human)" in prompt
+    assert "the assistant (the AI)" in prompt
+    assert "New message from the user:" in prompt
+
+
+@pytest.mark.usefixtures("fake_langchain_client")
+async def test_event_summary_renders_participant_names():
+    """The summary's message list names each message's speaker using the chatgroup's
+    participant names, so the rebuilt summaries attribute statements correctly."""
+    chat_calls: list[dict] = []
+    async with get_async_sessionmaker()() as session, session.begin():
+        _, chat = await _make_test_chat(session, config={"user_name": "Aurélien", "assistant_name": "Glas"})
+        human = await _add_message(session, chat.id, "Human speaks")
+        await _add_message(session, chat.id, "AI speaks", role=MessageRole.ASSISTANT, prev_id=human.id)
+
+    with (
+        patch.object(Provider, "decide", _fake_decide(choice="new")),
+        patch("backend.llm.provider.ChatOpenAI", _fake_chat_model(calls=chat_calls)),
+    ):
+        assert await EventPipeline.run_round() == 2
+
+    assert len(chat_calls) == 2
+    assert "- Aurélien: Human speaks" in chat_calls[0]["prompt"]
+    assert "- Glas: AI speaks" in chat_calls[1]["prompt"]
 
 
 @pytest.mark.usefixtures("fake_langchain_client")

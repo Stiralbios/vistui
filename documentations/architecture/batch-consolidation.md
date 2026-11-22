@@ -5,8 +5,8 @@
 Raw messages alone are not ideal long-term memory. The batch consolidation system processes older messages during idle periods and distills them into three structured memory objects:
 
 - **Events** — summaries of contiguous message sequences within a Chat.
-- **Topics** — summaries of recurring themes across non-contiguous messages in a ChatGroup.
-- **Facts** — small, persistent facts about the user or world state in a ChatGroup.
+- **Topics** — titled, additive running summaries of recurring themes across non-contiguous messages in a ChatGroup: the body only grows (earlier lines stay, new ones are appended); the title can be reworded.
+- **Facts** — small snippets of the current state of one thing about the user or world in a ChatGroup (no history: a changed truth fully replaces the fact; two conflicting facts never coexist).
 
 The system is intentionally lazy: it does not need to run after every message. Modern chat context windows handle recent history; Vistui handles long-term memory.
 
@@ -168,10 +168,19 @@ round may create many events or none at all.
 
 The topic pipeline uses one LLM call per message.
 
+A topic is a short title followed by the additive running summary of one recurring theme:
+updates return the complete new text — the body only grows (earlier lines kept, new ones
+appended; the title can be reworded) — so the theme's evolution stays visible inside it.
+
 1. Select the oldest unprocessed message (`topic = waiting`) outside the protected window.
 2. Search existing Topics in the ChatGroup by embedding similarity (the same retrieval ranking logic as interactive retrieval). If the message is not embedded yet, no existing topics are offered and the LLM can only create new ones.
-3. Send the message and the top matching topics to the `topic_candidate` LLM prompt.
-4. The LLM returns a list of actions: create a new topic, update an existing topic with a rewritten summary, or skip a topic.
+3. Send the message and the top matching topics to the `topic_candidate` LLM prompt. The
+   rendered prompt introduces both participants by name (chatgroup config
+   `user_name`/`assistant_name`, generic fallbacks when unset) and attributes the new
+   message to its speaker.
+4. The LLM returns a list of actions: create a new topic, update an existing topic with its
+   complete new text (the body only grows: earlier lines kept, new ones appended; the title
+   can be reworded), or skip a topic.
 
 Apply each action:
 
@@ -185,12 +194,20 @@ Mark the message as `topic = done`.
 
 **Scope:** per ChatGroup.
 
-The fact pipeline uses one LLM call per message and is window-gated like events and topics: protected messages are never added to facts until they age out of the window. A fact itself is never protected from updates: once the updating message is outside the window, the fact can be rewritten in place.
+The fact pipeline uses one LLM call per message. A fact is a short title followed by a small
+body describing the current state of one thing. The body holds no history — when the truth
+changes it is fully replaced (the title can be reworded), and two conflicting facts never
+coexist (earlier states remain visible in events and topics). Protected messages are never
+added to facts until they age out of the window. A fact itself is never protected from
+updates: once the updating message is outside the window, the fact can be rewritten in place.
 
 1. Select the oldest unprocessed message (`fact = waiting`) outside the protected window.
 2. Search existing Facts in the ChatGroup by embedding similarity.
-3. Send the message and the top matching facts to the `fact_candidate` LLM prompt.
-4. The LLM returns a list of actions: create a new fact, update an existing fact with a rewritten summary, or skip a fact.
+3. Send the message and the top matching facts to the `fact_candidate` LLM prompt. The
+   rendered prompt introduces both participants by name and attributes the new message to
+   its speaker, like the topic candidate prompt.
+4. The LLM returns a list of actions: create a new fact, update an existing fact with its
+   replacement text (the new current state), or skip a fact.
 
 Apply each action:
 
@@ -335,7 +352,9 @@ Status response:
   [Corrected the same day: see the newer entry above — facts are window-gated again.]
 - 2026-07-11: Initial batch consolidation design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: added embedding/salience as prerequisite batch pipelines, sequential per-message event→topic→fact ordering, event LLM can return multiple events, `fact_candidate` can create new facts, `fact_update` only updates existing facts.
-- 2026-12-01: Removed the separate `topic_update` and `fact_update` prompts; `topic_candidate` and `fact_candidate` now directly return create/update/skip actions, so consolidation applies updates in a single LLM call per message.
+- 2026-11-22: Removed the separate `topic_update` and `fact_update` prompts; `topic_candidate` and `fact_candidate` now directly return create/update/skip actions, so consolidation applies updates in a single LLM call per message.
+- 2026-11-22: The topic/fact prompts now encode the split between the two memory types — topics are titled, additive running summaries (updates return the complete new text: the body only grows, the title can be reworded), facts are titled current-state snippets (updates fully replace the body, conflicting facts never coexist).
+- 2026-11-22: Statements are attributed to their author: the chatgroup config gained `user_name`/`assistant_name` (display names of the two participants, generic fallbacks), the candidate prompts name both participants and attribute each message to its speaker, and event summary member lists name each message's speaker.
 
 - 2026-11-15: Salience scoring switched from batched `decide()` calls (one call per
   chatgroup, chunked at 5 questions) to element-per-element scoring (one call per

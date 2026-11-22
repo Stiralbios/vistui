@@ -146,6 +146,8 @@ Request:
     },
     "use_llm_memory_ratio": true,
     "protected_message_count": 10,
+    "user_name": "Aurélien",
+    "assistant_name": "Glas",
     "max_facts_per_message": 5,
     "max_topics_per_message": 5,
     "batch_inactivity_seconds": 3600,
@@ -531,7 +533,8 @@ Token estimates use a simple tokenizer heuristic; exactness is not critical beca
   stored one requeues the derived artifacts.
 - 2026-07-11: Initial API contract derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: frontend terminology, removed memory_ratio from ChatGroup config, removed dedicated memory retrieval endpoint, split fact prompts into `fact_candidate` and `fact_update`, added embedding/salience processing state.
-- 2026-12-01: Removed the `topic_update`/`fact_update` prompts and the `topic_update_threshold`, `fact_update_threshold`, and `fact_history_count` config fields; `topic_candidate`/`fact_candidate` now directly return create/update/skip actions.
+- 2026-11-22: Removed the `topic_update`/`fact_update` prompts and the `topic_update_threshold`, `fact_update_threshold`, and `fact_history_count` config fields; `topic_candidate`/`fact_candidate` now directly return create/update/skip actions.
+- 2026-11-22: The config gained `user_name`/`assistant_name` (display names of the conversation's participants, generic fallbacks "the user"/"the assistant"): the topic/fact/event prompts attribute statements to their author by name. `topic_candidate`/`fact_candidate` prompt values must be valid format templates (unknown placeholders are `422`).
 
 - 2026-11-21: `ranking_formula` stores the *name* of a formula defined in the
   settings file's `ranking_formulas` section instead of lambda source (the create /

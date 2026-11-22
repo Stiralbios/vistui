@@ -39,8 +39,8 @@ MEMORY_RATIO = "Determine the desired memory category distribution."
 DEFAULT_MEMORY_RATIO_CRITERIA = {
     "message": "A verbatim chat message.",
     "event": "A summary of a contiguous sequence of messages.",
-    "topic": "A summary of a recurring theme across the chatgroup.",
-    "fact": "A small persistent fact about the user or the world state.",
+    "topic": "The additive running summary of a recurring theme across the chatgroup.",
+    "fact": "A small snippet of the current state of one thing about the user or the world.",
 }
 
 # Instructions of the event-boundary choice question: how the next message relates to
@@ -71,10 +71,29 @@ EVENT_SUMMARY = (
     "Messages:\n{messages}"
 )
 
+# Topic maintenance: short title + additive body. The body only grows (earlier lines kept,
+# new ones appended); the title can be reworded freely.
 TOPIC_CANDIDATE = """\
-You are updating topic summaries for a chat group.
-Given a new message and a list of existing topics, decide for each topic whether to update it,
-and decide whether any new topics should be created.
+You are maintaining the topics of a chat group.
+
+The conversation is between two participants: {user_name} (the human) and {assistant_name}
+(the AI). Messages come from either of them — attribute each statement to whoever made it,
+and refer to the participants by name rather than as "the user" or "the AI".
+
+A topic is the running summary of one recurring theme of the conversation: a short title
+followed by an additive list of statements, shaped like:
+Horses:
+- {user_name} used to ride horses.
+- {user_name} stopped riding two years ago.
+
+When updating a topic, return its complete new text. The body only ever grows: everything
+it already says plus the new information from the message, as additional lines — never drop
+or rewrite earlier body lines, and if the message contradicts them, add the newer statement
+as a new line so the evolution stays visible. The title may be reworded freely to stay
+accurate.
+
+Given a new message and the existing topics, decide for each topic whether to extend it, and
+whether any new topics should be created.
 
 Return strictly a JSON array of actions with the shape:
 [
@@ -83,7 +102,7 @@ Return strictly a JSON array of actions with the shape:
   {{"action": "skip", "topic_id": "existing-topic-id"}}
 ]
 
-New message:
+New message from {speaker}:
 {message}
 
 Existing topics (id - summary):
@@ -92,10 +111,29 @@ Existing topics (id - summary):
 Maximum topics to touch: {max_topics}
 """
 
+# Fact maintenance: short title + current-state body. The body is fully replaced when the
+# truth changes; conflicting facts never coexist.
 FACT_CANDIDATE = """\
-You are updating factual memories for a chat group.
-Given a new message and a list of existing facts, decide for each fact whether to update it,
-and decide whether any new facts should be created.
+You are maintaining the facts of a chat group.
+
+The conversation is between two participants: {user_name} (the human) and {assistant_name}
+(the AI). Messages come from either of them — attribute each statement to whoever made it,
+and refer to the participants by name rather than as "the user" or "the AI".
+
+A fact is a small snippet describing the current state of one specific thing about a
+participant or the world: a short title followed by the current state, shaped like:
+{user_name}'s mom health:
+{user_name}'s mom has cancer.
+
+When updating a fact, return its complete new text. The body holds no history and no lists:
+when the truth changes, it is fully replaced by the new state, and two conflicting facts
+must never coexist. Earlier states stay visible in the events and topics, not in the facts —
+when the message invalidates an existing fact, update that fact to the new truth instead of
+creating a second one. The title may be reworded freely; a fact the message does not change
+is skipped.
+
+Given a new message and the existing facts, decide for each fact whether to replace it, and
+whether any new facts should be created.
 
 Return strictly a JSON array of actions with the shape:
 [
@@ -104,7 +142,7 @@ Return strictly a JSON array of actions with the shape:
   {{"action": "skip", "fact_id": "existing-fact-id"}}
 ]
 
-New message:
+New message from {speaker}:
 {message}
 
 Existing facts (id - summary):

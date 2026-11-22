@@ -82,12 +82,14 @@ per-message boundary decision (extend the last event, open a new one, or both).
 
 ## Topic
 
-A summary of a recurring theme across non-contiguous messages in a ChatGroup.
+A short title followed by the additive running summary of a recurring theme across non-contiguous messages in a ChatGroup. The body only grows: updates keep earlier lines and append new ones; the title can be reworded.
 
 ### Business Rules
 
 - Scoped to a ChatGroup.
 - Links to non-contiguous Messages via `topic_message_links`.
+- Additive: an update returns the complete new text — the body only grows (earlier lines kept, new ones appended); the title can be reworded.
+- Statements are attributed to their author by name (`config.user_name`/`config.assistant_name`, generic fallbacks).
 - When updated, only the latest linked message is the active context; older links form history.
 
 ### Files
@@ -96,12 +98,14 @@ A summary of a recurring theme across non-contiguous messages in a ChatGroup.
 
 ## Fact
 
-A small, persistent fact to remember across a ChatGroup.
+A short title followed by a small body describing the current state of one specific thing about the user or the world. The body holds no history: a changed truth fully replaces it (the title can be reworded), and two conflicting facts never coexist.
 
 ### Business Rules
 
 - Scoped to a ChatGroup.
 - Links to multiple Messages via `fact_message_links`.
+- Current-state only: an update fully replaces the body with the new truth; the title can be reworded.
+- Statements are attributed to their author by name (`config.user_name`/`config.assistant_name`, generic fallbacks).
 - The latest linked message is the active context; older links are history.
 - Rewritten in place when the underlying truth changes (e.g., "Mom is sick" → "Mom is on vacation").
 
