@@ -71,8 +71,7 @@ EVENT_SUMMARY = (
     "Messages:\n{messages}"
 )
 
-# Topic maintenance: short title + additive body. The body only grows (earlier lines kept,
-# new ones appended); the title can be reworded freely.
+# Topic maintenance: narrow, specific themes. The body only grows; the title stays narrow.
 TOPIC_CANDIDATE = """\
 You are maintaining the topics of a chat group.
 
@@ -80,31 +79,30 @@ The conversation is between two participants: {user_name} (the human) and {assis
 (the AI). Messages come from either of them — attribute each statement to whoever made it,
 and refer to the participants by name rather than as "the user" or "the AI".
 
-A topic is the running summary of one recurring theme of the conversation: a short title
-followed by an additive list of statements, shaped like:
-Horses:
-- {user_name} used to ride horses.
-- {user_name} stopped riding two years ago.
+A topic is the running summary of ONE specific recurring theme of the conversation: a short,
+specific title followed by an additive list of statements, shaped like:
+Maxime's usual emotional state:
+- Maxime often feels anxious after work.
 
-When updating a topic, return its complete new text. The body only ever grows: everything
-it already says plus the new information from the message, as additional lines — never drop
-or rewrite earlier body lines, and if the message contradicts them, add the newer statement
-as a new line so the evolution stays visible. The title may be reworded freely to stay
-accurate.
+Keep topics narrow and specific. Do not combine several distinct themes into a single broad
+topic. If a message touches several distinct themes, emit several create/update actions — one
+for each narrow theme.
+
+Examples:
+- BAD broad topic: "Salie's Existence and Identity"
+- GOOD narrow topics: "Salie's Existence" and "Salie's Identity"
+- BAD broad topic: "Maxime's Emotional State"
+- GOOD narrow topic: "Maxime's usual emotional state"
+
+When updating a topic, return its complete new text. The body only ever grows: everything it
+already says plus the new information from the message, as additional lines — never drop or
+rewrite earlier body lines, and if the message contradicts them, add the newer statement as
+a new line so the evolution stays visible. The title may be reworded freely to stay accurate,
+but keep it narrow.
 
 Rule — one theme, one topic: before creating a new topic, check whether an existing topic
-covers the same theme. If it does, extend that topic instead of creating a duplicate with a
-slightly different title.
-
-Example of what NOT to do:
-- Existing topic: "Glas's Existence and Identity: ..."
-- New message adds self-perception details.
-- BAD: create "Glas's Existence and Self-Perception: ..."
-- GOOD: update "Glas's Existence and Identity" with the new details.
-
-Given a new message and the existing topics, decide for each topic whether to extend it, and
-whether any new topics should be created. Prefer updating an existing topic over creating a
-new one when the message belongs to a theme already covered.
+covers the same specific theme. If it does, extend that topic instead of creating a duplicate
+with a slightly different title.
 
 Return strictly a JSON array of actions with the shape:
 [
@@ -122,7 +120,7 @@ Existing topics (id - summary):
 Maximum topics to touch: {max_topics}
 """
 
-# Fact maintenance: short title + current-state body. The body is fully replaced when the
+# Fact maintenance: titled current-state snippets. The body is fully replaced when the
 # truth changes; conflicting facts never coexist.
 FACT_CANDIDATE = """\
 You are maintaining the facts of a chat group.
@@ -131,10 +129,13 @@ The conversation is between two participants: {user_name} (the human) and {assis
 (the AI). Messages come from either of them — attribute each statement to whoever made it,
 and refer to the participants by name rather than as "the user" or "the AI".
 
-A fact is a small snippet describing the current state of one specific thing about a
+A fact is a small snippet describing the current state of ONE specific thing about a
 participant or the world: a short title followed by the current state, shaped like:
 {user_name}'s mom health:
 {user_name}'s mom has cancer.
+
+Every fact must have a title. The summary returned for create or update must always start
+with a title line ending with a colon, then one concise body line.
 
 When updating a fact, return its complete new text. The body holds no history and no lists:
 when the truth changes, it is fully replaced by the new state, and two conflicting facts
@@ -144,18 +145,14 @@ creating a second one. The title may be reworded freely; a fact the message does
 is skipped.
 
 Rule — one subject, one fact: before creating a new fact, check whether an existing fact
-covers the same subject (mood, health, preference, relationship, role, etc.). If it does,
-update that fact instead of creating a duplicate with a slightly different title.
+covers the same specific subject (mood, health, preference, relationship, role, etc.). If it
+does, update that fact instead of creating a duplicate with a slightly different title.
 
 Example of what NOT to do:
-- Existing fact: "Aurélien's mood: Meh"
-- New message: Aurélien says he is still meh / feels down.
-- BAD: create "Aurélien's emotional state: feels down" or "Aurélien's current mood: Meh"
-- GOOD: update "Aurélien's mood" to the new state.
-
-Given a new message and the existing facts, decide for each fact whether to replace it, and
-whether any new facts should be created. Prefer updating an existing fact over creating a new
-one when the message is about a subject already covered.
+- Existing fact: "Maxime's mood: Meh"
+- New message: Maxime says he is still meh / feels down.
+- BAD: create "Maxime's emotional state: feels down" or "Maxime's current mood: Meh"
+- GOOD: update "Maxime's mood" to the new state.
 
 Return strictly a JSON array of actions with the shape:
 [
