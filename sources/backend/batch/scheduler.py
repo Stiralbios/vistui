@@ -53,6 +53,8 @@ def start_scheduler() -> None:
             seconds=interval,
             id="batch_round",
             replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
         logger.info(f"Scheduled batch worker every {interval} seconds")
     elif scheduler.get_job("batch_round") is not None:

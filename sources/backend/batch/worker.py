@@ -39,11 +39,20 @@ class BatchWorker:
             self.provider = Provider()
         return self.provider
 
+    @property
+    def running(self) -> bool:
+        """Return whether a round is currently in progress for this worker instance."""
+        return batch_status.running
+
     async def run_round(self) -> None:
         """Run each pipeline exactly once, each in its own transaction, and refresh the
         queue depth before and after so the admin status stays accurate."""
         provider = await self.get_provider()
         settings = AppSettings()
+
+        if batch_status.running:
+            logger.info("BatchWorker round skipped: another round is already running")
+            return
 
         batch_status.running = True
         batch_status.current_pipeline = None

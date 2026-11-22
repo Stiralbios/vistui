@@ -10,6 +10,7 @@ from backend.seeders import seed_demo_chat
 from backend.topic.models import TopicDO
 from backend.utils.embeddings import embed_texts
 from fastapi import APIRouter
+from loguru import logger
 from sqlalchemy import select
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -23,7 +24,12 @@ async def seed_demo() -> SeedDemoResponse:
 
 @router.post("/batch/trigger", response_model=TriggerBatchResponse)
 async def trigger_batch() -> TriggerBatchResponse:
+    """Run one batch worker round manually. If a round is already in progress (scheduled
+    or another manual trigger), return immediately without starting a second one."""
     worker = BatchWorker()
+    if worker.running:
+        logger.info("Manual batch trigger ignored: a batch round is already running")
+        return TriggerBatchResponse(status="already_running")
     await worker.run_round()
     return TriggerBatchResponse(status="ok")
 
