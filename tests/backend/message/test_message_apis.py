@@ -130,7 +130,7 @@ async def test_update_message_text_change_requeues_derived_data(client: AsyncCli
         row = await session.get(MessageDO, uuid.UUID(message["id"]))
         assert row is not None
         assert row.edited_at is not None
-        assert row.embedding is None
+        assert row.embedding is not None  # recomputed synchronously on text change
         assert row.salience_score is None
         assert row.processing_state["event"] == "waiting"
         assert row.processing_state["topic"] == "waiting"

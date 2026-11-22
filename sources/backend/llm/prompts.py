@@ -92,8 +92,19 @@ or rewrite earlier body lines, and if the message contradicts them, add the newe
 as a new line so the evolution stays visible. The title may be reworded freely to stay
 accurate.
 
+Rule — one theme, one topic: before creating a new topic, check whether an existing topic
+covers the same theme. If it does, extend that topic instead of creating a duplicate with a
+slightly different title.
+
+Example of what NOT to do:
+- Existing topic: "Glas's Existence and Identity: ..."
+- New message adds self-perception details.
+- BAD: create "Glas's Existence and Self-Perception: ..."
+- GOOD: update "Glas's Existence and Identity" with the new details.
+
 Given a new message and the existing topics, decide for each topic whether to extend it, and
-whether any new topics should be created.
+whether any new topics should be created. Prefer updating an existing topic over creating a
+new one when the message belongs to a theme already covered.
 
 Return strictly a JSON array of actions with the shape:
 [
@@ -132,8 +143,19 @@ when the message invalidates an existing fact, update that fact to the new truth
 creating a second one. The title may be reworded freely; a fact the message does not change
 is skipped.
 
+Rule — one subject, one fact: before creating a new fact, check whether an existing fact
+covers the same subject (mood, health, preference, relationship, role, etc.). If it does,
+update that fact instead of creating a duplicate with a slightly different title.
+
+Example of what NOT to do:
+- Existing fact: "Aurélien's mood: Meh"
+- New message: Aurélien says he is still meh / feels down.
+- BAD: create "Aurélien's emotional state: feels down" or "Aurélien's current mood: Meh"
+- GOOD: update "Aurélien's mood" to the new state.
+
 Given a new message and the existing facts, decide for each fact whether to replace it, and
-whether any new facts should be created.
+whether any new facts should be created. Prefer updating an existing fact over creating a new
+one when the message is about a subject already covered.
 
 Return strictly a JSON array of actions with the shape:
 [

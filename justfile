@@ -7,7 +7,7 @@ export VISTUI_TEST_DATABASE_URL := env("VISTUI_TEST_DATABASE_URL", "postgresql+p
 
 # Owner of the demo data: created on app boot and by the demo_local import scripts.
 # Recipes that need different values override them inline.
-export DEFAULT_EMAIL := env("DEFAULT_EMAIL", "demo@vistui.local")
+export DEFAULT_EMAIL := env("DEFAULT_EMAIL", "demo@vistui.dev")
 export DEFAULT_PASSWORD := env("DEFAULT_PASSWORD", "demopassword123")
 
 # Start dev services (ParadeDB dev + test databases)

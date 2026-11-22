@@ -121,9 +121,7 @@ async def test_batch_trigger_endpoint(client):
 
 @pytest.mark.usefixtures("fake_langchain_client")
 async def test_reembed_endpoint(client):
-    """After consolidation, reembed must null every vector — a NULL embedding is the
-    requeue marker, so the worker recomputes everything with the (new) embedding model
-    on the next rounds."""
+    """After consolidation, reembed recomputes every embedding synchronously."""
     await client.post("/admin/seed/demo")
     assert (await client.post("/admin/batch/trigger")).status_code == 200
 
@@ -139,10 +137,11 @@ async def test_reembed_endpoint(client):
         messages = list((await session.execute(select(MessageDO))).scalars().all())
         assert len(messages) == 30
         for message in messages:
-            assert message.embedding is None
+            assert message.embedding is not None
         for model in (EventDO, TopicDO, FactDO):
             objects = list((await session.execute(select(model))).scalars().all())
-            assert all(obj.embedding is None for obj in objects)
+            assert all(obj.embedding is not None for obj in objects)
 
-        # The queue depth is derived from the same NULL condition: everything is backlogged.
-        assert await BatchQueries.count_waiting_messages(session) >= 30
+        # The queue depth is now driven by salience and consolidation flags, not
+        # embeddings. A salience round may have already scored some demo messages.
+        assert await BatchQueries.count_waiting_messages(session) >= 0

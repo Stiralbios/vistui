@@ -8,8 +8,9 @@ from backend.fact.models import FactDO
 from backend.message.models import MessageDO
 from backend.seeders import seed_demo_chat
 from backend.topic.models import TopicDO
+from backend.utils.embeddings import embed_texts
 from fastapi import APIRouter
-from sqlalchemy import update
+from sqlalchemy import select
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -29,14 +30,32 @@ async def trigger_batch() -> TriggerBatchResponse:
 
 @router.post("/reembed", response_model=ReembedResponse)
 async def reembed() -> ReembedResponse:
-    """Null all embeddings and requeue them. Used after switching embedding models:
-    vectors from different models are not comparable, so everything must be recomputed
-    by the batch worker: a NULL embedding is the requeue marker itself."""
+    """Recompute embeddings for every message and memory object.
+
+    Used after switching embedding models: vectors from different models are not
+    comparable, so everything must be embedded with the (new) model. Embeddings are
+    computed synchronously in this endpoint because there is no separate embedding
+    batch stage anymore.
+    """
+    counts: dict[str, int] = {"messages": 0, "events": 0, "topics": 0, "facts": 0}
+
     async with get_async_sessionmaker()() as session, session.begin():
-        messages = (await session.execute(update(MessageDO).values(embedding=None))).rowcount
-        counts = {"messages": messages}
-        for key, model in (("events", EventDO), ("topics", TopicDO), ("facts", FactDO)):
-            counts[key] = (await session.execute(update(model).values(embedding=None))).rowcount
+        messages = list((await session.execute(select(MessageDO))).scalars().all())
+        if messages:
+            embeddings = await embed_texts([message.full_text for message in messages])
+            for message, vector in zip(messages, embeddings):
+                message.embedding = vector
+        counts["messages"] = len(messages)
+
+    for key, model in (("events", EventDO), ("topics", TopicDO), ("facts", FactDO)):
+        async with get_async_sessionmaker()() as session, session.begin():
+            objects = list((await session.execute(select(model))).scalars().all())
+            if objects:
+                embeddings = await embed_texts([obj.full_text for obj in objects])
+                for obj, vector in zip(objects, embeddings):
+                    obj.embedding = vector
+            counts[key] = len(objects)
+
     return ReembedResponse(**counts)
 
 

@@ -301,14 +301,14 @@ Rules:
 - If `message_id` does not exist, a new Message is created.
 - If `message_id` exists, it is overwritten in place.
 - The linked list is validated: `prev_message_id` and `next_message_id` must be consistent with existing neighbors.
-- The embedding is recomputed.
+- The embedding is recomputed synchronously.
 - Memory ratio is determined per retrieval request, either by LLM (if `use_llm_memory_ratio` is enabled) or from the ChatGroup `memory_ratio` config.
 - Retrieval is performed only if `retrieve=true`.
 - Every message write that carries `full_text` bumps `edited_at` — the field records when
   the text was last written and is set at creation too. When the new text actually
-  differs from the stored one, the embedding and salience fields are cleared and the
-  event/topic/fact flags are reset to `waiting`. A role-only change, or a PATCH carrying
-  identical text, updates nothing derived.
+  differs from the stored one, the embedding is recomputed synchronously, the salience
+  field is cleared, and the event/topic/fact flags are reset to `waiting`. A role-only
+  change, or a PATCH carrying identical text, updates nothing derived.
 
 Response: `200 OK` (or `201 Created` on first creation)
 
@@ -453,20 +453,22 @@ POST /admin/batch/trigger
 
 Immediate no-op if worker is already running. Used mainly for testing.
 
-#### Get batch status
+#### Re-embed everything
 
 ```
-GET /admin/batch/status
+POST /admin/reembed
 ```
 
-Response:
+Recomputes embeddings for every message, event, topic and fact synchronously.
+Used after switching embedding models because vectors from different models are
+not comparable. Response:
 
 ```json
 {
-  "running": true,
-  "current_chatgroup_id": "uuid-or-null",
-  "current_pipeline": "fact",
-  "queue_depth": 42
+  "messages": 30,
+  "events": 5,
+  "topics": 12,
+  "facts": 8
 }
 ```
 

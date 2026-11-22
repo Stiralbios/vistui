@@ -25,6 +25,7 @@ from backend.message.models import MessageDO
 from backend.search.formulas import DEFAULT_RANKING_FORMULA, DEFAULT_RANKING_FORMULA_NAME
 from backend.search.scoring import LINK_WEIGHT_REFERENCE, evaluate_ranking_formula, link_weight, normalize_bm25
 from backend.user.models import UserDO
+from backend.utils.embeddings import embed_texts
 from httpx import AsyncClient
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from sqlalchemy import select
@@ -177,20 +178,27 @@ async def _seed_search_data(
             "The new office has standing desks and a quiet room.",
             "I repainted the balcony fence in dark green.",
         ]
+        added_messages: list[MessageDO] = []
         for text in texts:
-            session.add(
-                MessageDO(
-                    id=uuid.uuid4(),
-                    chat_id=chat.id,
-                    full_text=text,
-                    role="user",
-                    processing_state={
-                        "event": ProcessingStatus.WAITING,
-                        "topic": ProcessingStatus.WAITING,
-                        "fact": ProcessingStatus.WAITING,
-                    },
-                )
+            message = MessageDO(
+                id=uuid.uuid4(),
+                chat_id=chat.id,
+                full_text=text,
+                role="user",
+                processing_state={
+                    "event": ProcessingStatus.WAITING,
+                    "topic": ProcessingStatus.WAITING,
+                    "fact": ProcessingStatus.WAITING,
+                },
             )
+            session.add(message)
+            added_messages.append(message)
+
+        provider = Provider()
+        embeddings = await embed_texts([message.full_text for message in added_messages], provider)
+        for message, vector in zip(added_messages, embeddings):
+            message.embedding = vector
+
     return {"chatgroup_id": chatgroup.id}
 
 
@@ -286,9 +294,12 @@ async def test_search_endpoint_hybrid_ranking(client: AsyncClient):
     assert (await client.post("/admin/batch/trigger")).status_code == 200
 
     token = await login(client, "test@example.com", "devpassword123")
+    # Two rounds create 10 messages, 10 topics, 10 facts and one event. The default
+    # k=20 would exclude the event because it scores below every message/topic/fact,
+    # so ask for enough hits to see all memory types.
     response = await client.get(
         f"/api/v1/chatgroups/{ids['chatgroup_id']}/search",
-        params={"q": "hiking"},
+        params={"q": "hiking", "k": 50},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200

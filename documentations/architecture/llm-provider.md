@@ -139,7 +139,8 @@ class Provider:
 
 ## Embedding call semantics
 
-- Batchable when possible, but a single message only needs one embedding.
+- Embeddings are computed synchronously on the write path: message create/update and
+  memory-object create/update block on the embedding provider before committing.
 - The configured `dimensions` is used to validate returned vectors before storing them.
 - All embeddings are stored as `pgvector` vectors of the configured dimension.
 

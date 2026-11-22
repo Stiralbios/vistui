@@ -4,7 +4,6 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any
 
-from backend.batch.embeddings import embed_memory_objects, embed_messages
 from backend.batch.pipelines import EventPipeline, FactPipeline, TopicPipeline
 from backend.batch.queries import BatchQueries
 from backend.batch.salience import SaliencePipeline, score_memory_objects
@@ -57,12 +56,9 @@ class BatchWorker:
             # (name used for status/logs and as processing_state key, async callable).
             # The per-round work limits come from the VISTUI_BATCH_* settings; the
             # consolidation pipelines event/topic/fact process messages one by one.
+            # Embeddings are computed synchronously when objects are created/edited,
+            # so the standalone embedding batch stages are gone.
             pipelines: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
-                ("embedding", partial(embed_messages, limit=settings.VISTUI_BATCH_EMBEDDING_LIMIT)),
-                (
-                    "memory_embedding",
-                    partial(embed_memory_objects, limit=settings.VISTUI_BATCH_MEMORY_EMBEDDING_LIMIT),
-                ),
                 ("salience", partial(SaliencePipeline.run_round, limit=settings.VISTUI_BATCH_SALIENCE_LIMIT)),
                 (
                     "memory_salience",

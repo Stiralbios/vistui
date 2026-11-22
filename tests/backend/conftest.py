@@ -1,4 +1,5 @@
 import os
+from unittest.mock import patch
 
 # Mark tests as running in the TEST environment before any app modules are imported.
 os.environ.setdefault("APP_ENVIRONMENT", "TEST")
@@ -8,7 +9,34 @@ from backend.database import Base
 from backend.main import app
 from backend.seeders import create_default_user
 from httpx import ASGITransport, AsyncClient
+from langchain_openai import OpenAIEmbeddings
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+def _fake_embeddings_model():
+    """Return a LangChain OpenAIEmbeddings whose aembed_documents returns deterministic
+    vectors. Patched globally for backend tests so message/memory creation can compute
+    embeddings synchronously without calling a real provider."""
+
+    class FakeEmbeddings(OpenAIEmbeddings):
+        def __init__(self, **kwargs):
+            pass
+
+        async def aembed_documents(
+            self, texts: list[str], chunk_size: int | None = None, **kwargs
+        ) -> list[list[float]]:
+            return [[0.01 * i] + [0.0] * 767 for i in range(len(texts))]
+
+        async def aembed_query(self, text: str, **kwargs) -> list[float]:
+            return [0.0] * 768
+
+    return FakeEmbeddings
+
+
+@pytest.fixture(autouse=True)
+def patch_embeddings_globally():
+    with patch("backend.llm.provider.OpenAIEmbeddings", _fake_embeddings_model()):
+        yield
 
 
 @pytest.fixture(scope="session")

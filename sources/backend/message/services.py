@@ -7,6 +7,7 @@ from backend.exceptions import (
     ChatNotFoundProblem,
     MessageNotFoundProblem,
 )
+from backend.llm import Provider
 from backend.message.schemas import (
     MessageCreateInternal,
     MessageFilter,
@@ -18,17 +19,18 @@ from backend.message.stores import MessageStore
 
 
 class MessageService:
-    def __init__(self) -> None:
+    def __init__(self, provider: Provider | None = None) -> None:
         self.store = MessageStore
         self.chat_store = ChatStore
         self.chatgroup_store = ChatGroupStore
+        self.provider = provider or Provider()
 
     async def create(self, message: MessageCreateInternal) -> MessageInternal:
         await self._ensure_chat_access(message.chat_id, message.context.user_id)
         last_message_id = await self.store.get_last_message_id(message.chat_id)
         message.prev_message_id = last_message_id
         message.processing_state = default_processing_state()
-        return await self.store.create(message)
+        return await self.store.create(message, provider=self.provider)
 
     async def retrieve(self, message_id: uuid.UUID, chat_id: uuid.UUID, user_id: uuid.UUID) -> MessageInternal:
         message = await self.store.retrieve(message_id)
@@ -40,7 +42,7 @@ class MessageService:
         existing = await self.store.retrieve(message.id)
         if existing is None or existing.chat_id != message.chat_id:
             raise MessageNotFoundProblem(f"Message {message.id} not found")
-        return await self.store.update(message)
+        return await self.store.update(message, provider=self.provider)
 
     async def delete(self, message_id: uuid.UUID, chat_id: uuid.UUID, user_id: uuid.UUID) -> None:
         existing = await self.store.retrieve(message_id)

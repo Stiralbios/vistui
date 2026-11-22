@@ -18,12 +18,11 @@ class AppSettings(BaseSettings):
     # ChatGroups can override it per group via their config's protected_message_count.
     VISTUI_PROTECTED_MESSAGE_COUNT: int = 10
     VISTUI_BATCH_INTERVAL_SECONDS: int = 60
-    # Batch worker: per-round work limits. The batch stages (embeddings, salience)
-    # select on their NULL-column queues; the consolidation stages (event/topic/fact)
-    # process messages one by one, up to their limit per round. See
+    # Batch worker: per-round work limits. Salience stages select on their NULL-column
+    # queues; the consolidation stages (event/topic/fact) process messages one by one,
+    # up to their limit per round. Embeddings are now computed synchronously on
+    # create/update, so no standalone embedding stage remains. See
     # documentations/architecture/batch-consolidation.md.
-    VISTUI_BATCH_EMBEDDING_LIMIT: int = 32
-    VISTUI_BATCH_MEMORY_EMBEDDING_LIMIT: int = 32
     VISTUI_BATCH_SALIENCE_LIMIT: int = 5
     VISTUI_BATCH_MEMORY_SALIENCE_LIMIT: int = 32
     VISTUI_BATCH_EVENT_MESSAGE_LIMIT: int = 10

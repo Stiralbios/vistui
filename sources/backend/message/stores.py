@@ -3,6 +3,7 @@ import uuid
 
 from backend.database import with_async_session
 from backend.exceptions import MessageNotFoundProblem
+from backend.llm import Provider
 from backend.message.constants import MessageRole
 from backend.message.models import MessageDO
 from backend.message.schemas import (
@@ -11,6 +12,7 @@ from backend.message.schemas import (
     MessageUpdateInternal,
     default_processing_state,
 )
+from backend.utils.embeddings import embed_text
 from pydantic import UUID4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,8 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class MessageStore:
     @staticmethod
     @with_async_session
-    async def create(session: AsyncSession, message: MessageCreateInternal) -> MessageInternal:
+    async def create(
+        session: AsyncSession, message: MessageCreateInternal, provider: Provider | None = None
+    ) -> MessageInternal:
         orm_object = MessageDO(**message.model_dump(exclude={"context"}))
+        orm_object.embedding = await embed_text(orm_object.full_text, provider)
         session.add(orm_object)
         await session.flush()
         await session.refresh(orm_object)
@@ -34,7 +39,9 @@ class MessageStore:
 
     @staticmethod
     @with_async_session
-    async def update(session: AsyncSession, message: MessageUpdateInternal) -> MessageInternal:
+    async def update(
+        session: AsyncSession, message: MessageUpdateInternal, provider: Provider | None = None
+    ) -> MessageInternal:
         orm_object = await session.get(MessageDO, message.id)
         if orm_object is None:
             raise MessageNotFoundProblem(f"Message {message.id} not found")
@@ -48,10 +55,9 @@ class MessageStore:
             # The text field was rewritten: record the write.
             orm_object.edited_at = dt.datetime.now(dt.timezone.utc)
         if text_changed:
-            # The content really changed: requeue everything derived from the text —
-            # the NULL columns requeue the embedding and salience stages, the flags
-            # requeue consolidation.
-            orm_object.embedding = None
+            # The content really changed: recompute its embedding and requeue
+            # everything derived from the text.
+            orm_object.embedding = await embed_text(orm_object.full_text, provider)
             orm_object.salience_score = None
             orm_object.processing_state = default_processing_state()
         await session.flush()

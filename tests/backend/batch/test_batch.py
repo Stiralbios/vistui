@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import pytest
 from backend.batch import BatchWorker, batch_status
-from backend.batch.embeddings import embed_memory_objects, embed_messages
 from backend.batch.pipelines import EventPipeline, FactPipeline, TopicPipeline
 from backend.batch.queries import BatchQueries
 from backend.batch.salience import SaliencePipeline, score_memory_objects
@@ -26,6 +25,7 @@ from backend.seeders import seed_demo_chat
 from backend.settings import AppSettings
 from backend.topic.models import TopicDO, TopicMessageLinkDO
 from backend.user.models import UserDO
+from backend.utils.embeddings import embed_text
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from sqlalchemy import select
 
@@ -169,12 +169,27 @@ async def _done_state():
     }
 
 
+_UNSET_EMBEDDING = object()
+
+
 async def _add_message(
-    session, chat_id, full_text, role=MessageRole.USER, prev_id=None, state=None, created_at=None, embedding=None
+    session,
+    chat_id,
+    full_text,
+    role=MessageRole.USER,
+    prev_id=None,
+    state=None,
+    created_at=None,
+    embedding: list[float] | None | object = _UNSET_EMBEDDING,
 ):
     """Insert one waiting message; created_at/edited_at are set client-side (distinct
-    per call) because the column's server default is the transaction timestamp."""
+    per call) because the column's server default is the transaction timestamp.
+    Unless `embedding` is explicitly supplied (including `None`), the message text
+    is embedded synchronously so similarity-based consolidation behaves like
+    production."""
     written_at = created_at or dt.datetime.now(dt.timezone.utc)
+    if embedding is _UNSET_EMBEDDING:
+        embedding = await embed_text(full_text)
     message = MessageDO(
         id=uuid.uuid4(),
         chat_id=chat_id,
@@ -209,13 +224,13 @@ async def test_consolidation_round_limit_settings():
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
-async def test_embed_messages():
+async def test_message_embedding_is_computed_synchronously():
+    """Creating a message embeds its text synchronously before the commit."""
     async with get_async_sessionmaker()() as session, session.begin():
         _, chat = await _make_test_chat(session)
         message = await _add_message(session, chat.id, "Hello world")
-
-    embedded = await embed_messages()
-    assert embedded == 1
+        assert message.embedding is not None
+        assert len(message.embedding) == 768
 
     async with get_async_sessionmaker()() as session, session.begin():
         updated = await session.get(MessageDO, message.id)
@@ -403,7 +418,7 @@ async def test_consolidation_ignores_embedding_and_salience():
     column keeps its NULL value."""
     async with get_async_sessionmaker()() as session, session.begin():
         _, chat = await _make_test_chat(session)
-        await _add_message(session, chat.id, "Not embedded, not scored")
+        await _add_message(session, chat.id, "Not embedded, not scored", embedding=None)
 
     assert await EventPipeline.run_round() == 1
     assert await TopicPipeline.run_round() == 1
@@ -427,7 +442,7 @@ async def test_count_waiting_messages():
         _, chat = await _make_test_chat(session)
         _, chat_out = await _make_test_chat(session, use_salience=False)
         # 1. waiting for embedding and salience (counts)
-        await _add_message(session, chat.id, "Not embedded")
+        await _add_message(session, chat.id, "Not embedded", embedding=None)
         # 2. embedded, waiting for salience (counts: chatgroup opted in)
         await _add_message(session, chat.id, "Embedded unscored", embedding=[0.0] * 768)
         # 3. embedded + scored, consolidation done (does not count)
@@ -444,28 +459,6 @@ async def test_count_waiting_messages():
         waiting_event.processing_state = {**waiting_event.processing_state, "event": ProcessingStatus.WAITING}
 
         assert await BatchQueries.count_waiting_messages(session) == 3
-
-
-@pytest.mark.usefixtures("fake_langchain_client")
-async def test_embed_memory_objects():
-    async with get_async_sessionmaker()() as session, session.begin():
-        chatgroup, chat = await _make_test_chat(session)
-        event = EventDO(
-            chat_id=chat.id,
-            full_text="Test event",
-            start_at=chat.created_at,
-            end_at=chat.created_at,
-        )
-        session.add(event)
-
-    embedded = await embed_memory_objects()
-    assert embedded == 1
-
-    async with get_async_sessionmaker()() as session, session.begin():
-        updated = await session.get(EventDO, event.id)
-        assert updated is not None
-        assert updated.embedding is not None
-        assert len(updated.embedding) == 768
 
 
 @pytest.mark.usefixtures("fake_langchain_client")
@@ -496,6 +489,8 @@ async def test_event_pipeline_creates_first_event_without_decision():
         assert events[0].start_at == message.created_at
         assert events[0].end_at == message.created_at
         assert events[0].edited_at is not None
+        assert events[0].embedding is not None
+        assert len(events[0].embedding) == 768
         links = list(
             (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == events[0].id)))
             .scalars()
@@ -648,7 +643,7 @@ async def test_event_pipeline_extend_action_rewrites_from_members():
         assert events[0].full_text == "Extended summary"
         assert events[0].end_at == second.created_at
         assert events[0].edited_at > old_edited_at
-        assert events[0].embedding is None  # requeued for the memory stages
+        assert events[0].embedding is not None  # recomputed synchronously on rewrite
         assert events[0].salience_score is None
         links = list(
             (await session.execute(select(EventMessageLinkDO).where(EventMessageLinkDO.event_id == events[0].id)))
@@ -711,7 +706,7 @@ async def test_event_pipeline_mixed_action_spans_boundary():
         first_event, second_event = events
         assert first_event.full_text == "Close summary"
         assert first_event.end_at == second.created_at
-        assert first_event.embedding is None  # the rewrite requeues the row
+        assert first_event.embedding is not None  # recomputed synchronously on rewrite
         assert first_event.salience_score is None
         assert second_event.full_text == "Open summary"
         assert second_event.start_at == second.created_at
@@ -938,6 +933,8 @@ async def test_topic_pipeline():
         )
         assert len(topics) == 1
         assert topics[0].full_text == "Demo topic"
+        assert topics[0].embedding is not None
+        assert len(topics[0].embedding) == 768
         links = list(
             (await session.execute(select(TopicMessageLinkDO).where(TopicMessageLinkDO.topic_id == topics[0].id)))
             .scalars()
@@ -968,6 +965,7 @@ async def test_topic_pipeline_single_action_response():
             )
             assert len(topics) == 1
             assert topics[0].full_text == "Solo topic"
+            assert topics[0].embedding is not None
             links = list(
                 (await session.execute(select(TopicMessageLinkDO).where(TopicMessageLinkDO.topic_id == topics[0].id)))
                 .scalars()
@@ -1014,8 +1012,9 @@ async def test_topic_rewrite_bumps_edited_at():
             assert refreshed.full_text == "New summary"
             assert refreshed.edited_at is not None
             assert refreshed.edited_at > old_edited_at
-            # The rewrite requeues the topic's derived data.
-            assert refreshed.embedding is None
+            # The rewrite recomputes the embedding synchronously; salience is still
+            # refreshed by the memory-salience batch stage.
+            assert refreshed.embedding is not None
             assert refreshed.salience_score is None
 
 
@@ -1034,6 +1033,8 @@ async def test_fact_pipeline():
         )
         assert len(facts) == 1
         assert facts[0].full_text == "Demo fact"
+        assert facts[0].embedding is not None
+        assert len(facts[0].embedding) == 768
         links = list(
             (await session.execute(select(FactMessageLinkDO).where(FactMessageLinkDO.fact_id == facts[0].id)))
             .scalars()
@@ -1173,11 +1174,9 @@ async def test_protected_window_skips_recent_messages():
                 )
             )
 
-    # Embedding ignores the protected window: all 12 messages are embedded.
-    assert await embed_messages() == 12
-
-    # The event stage processes the 7 messages outside the window (its per-round limit
-    # is 10), the topic and fact stages the 5 oldest of them (limit 5).
+    # Embeddings are computed synchronously on creation, so all 12 messages are
+    # already embedded; the event stage processes the 7 messages outside the window (its
+    # per-round limit is 10), the topic and fact stages the 5 oldest of them (limit 5).
     assert await EventPipeline.run_round() == 7
     assert await EventPipeline.run_round() == 0  # remaining candidates are all protected
 

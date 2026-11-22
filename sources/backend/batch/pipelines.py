@@ -23,9 +23,11 @@ from backend.llm.provider import ChoiceQuestion
 from backend.message.constants import MessageRole, ProcessingStatus
 from backend.message.models import MessageDO
 from backend.topic.models import TopicDO, TopicMessageLinkDO
+from backend.utils.embeddings import embed_object, embed_text
 from loguru import logger
 from paradedb.sqlalchemy.vector import cosine_distance
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -43,6 +45,27 @@ async def record_stage_failure(message_id: uuid.UUID, state_key: str) -> None:
         message.processing_state = state
     batch_status.recent_failures += 1
     logger.warning(f"Stage {state_key} failed for message {message_id}")
+
+
+async def _link_message_to_event(session: AsyncSession, event_id: uuid.UUID, message_id: uuid.UUID) -> None:
+    """Idempotently link a message to an event."""
+    await session.execute(
+        insert(EventMessageLinkDO).values(event_id=event_id, message_id=message_id).on_conflict_do_nothing()
+    )
+
+
+async def _link_message_to_topic(session: AsyncSession, topic_id: uuid.UUID, message_id: uuid.UUID) -> None:
+    """Idempotently link a message to a topic."""
+    await session.execute(
+        insert(TopicMessageLinkDO).values(topic_id=topic_id, message_id=message_id).on_conflict_do_nothing()
+    )
+
+
+async def _link_message_to_fact(session: AsyncSession, fact_id: uuid.UUID, message_id: uuid.UUID) -> None:
+    """Idempotently link a message to a fact."""
+    await session.execute(
+        insert(FactMessageLinkDO).values(fact_id=fact_id, message_id=message_id).on_conflict_do_nothing()
+    )
 
 
 async def _process_waiting_messages(
@@ -154,13 +177,13 @@ class EventPipeline:
             if action == "extend":
                 members = await BatchQueries.get_event_messages(session, last_event.id)
                 await cls._rewrite_event(session, provider, chatgroup, last_event, members + [message])
-                session.add(EventMessageLinkDO(event_id=last_event.id, message_id=message.id))
+                await _link_message_to_event(session, last_event.id, message.id)
             elif action == "new":
                 await cls._create_event(session, provider, chatgroup, [message])
             elif action == "mixed":
                 members = await BatchQueries.get_event_messages(session, last_event.id)
                 await cls._rewrite_event(session, provider, chatgroup, last_event, members + [message])
-                session.add(EventMessageLinkDO(event_id=last_event.id, message_id=message.id))
+                await _link_message_to_event(session, last_event.id, message.id)
                 await cls._create_event(session, provider, chatgroup, [message])
             else:
                 raise ValueError(f"unknown event boundary action: {action}")
@@ -234,10 +257,11 @@ class EventPipeline:
             start_at=min(member.created_at for member in members),
             end_at=max(member.created_at for member in members),
         )
+        await embed_object(event, provider)
         session.add(event)
         await session.flush()
         for member in members:
-            session.add(EventMessageLinkDO(event_id=event.id, message_id=member.id))
+            await _link_message_to_event(session, event.id, member.id)
         return event
 
     @classmethod
@@ -250,14 +274,14 @@ class EventPipeline:
         members: list[MessageDO],
     ) -> None:
         """Rewrite an existing event from its full member list: the summary is rebuilt
-        from the sources, the time range is re-derived, and the row is invalidated like
-        a topic/fact update (edited_at bumped, embedding and salience cleared, so it
-        re-enters the memory embedding and salience queues)."""
+        from the sources, the time range is re-derived, and the embedding is
+        recomputed synchronously (salience is still refreshed by the memory-salience
+        batch stage)."""
         event.full_text = await cls._summarize(provider, chatgroup, members)
         event.start_at = min(member.created_at for member in members)
         event.end_at = max(member.created_at for member in members)
         event.edited_at = dt.datetime.now(dt.timezone.utc)
-        event.embedding = None
+        event.embedding = await embed_text(event.full_text, provider)
         event.salience_score = None
 
     @staticmethod
@@ -348,7 +372,7 @@ class TopicPipeline:
 
             actions = _extract_actions(response, "topics")
             for action in actions:
-                await cls._apply_action(session, chatgroup.id, message, action, existing_topics)
+                await cls._apply_action(session, chatgroup.id, message, action, existing_topics, provider)
 
             message.processing_state = {**message.processing_state, "topic": ProcessingStatus.DONE}
             return True
@@ -389,10 +413,11 @@ class TopicPipeline:
         message: MessageDO,
         action: dict,
         existing_topics: list[TopicDO],
+        provider: Provider,
     ) -> None:
         """Apply one LLM-decided action: create a new topic, or update an existing one and
-        link the message to it (updated topics get their embedding cleared, so they are
-        re-embedded on the next embedding round)."""
+        link the message to it. The topic embedding is recomputed synchronously so the
+        candidate pool is never stale."""
         action_type = action.get("action", "skip")
         now = dt.datetime.now(dt.timezone.utc)
 
@@ -402,9 +427,10 @@ class TopicPipeline:
                 full_text=action.get("summary", message.full_text),
                 start_at=message.created_at,
             )
+            await embed_object(topic, provider)
             session.add(topic)
             await session.flush()
-            session.add(TopicMessageLinkDO(topic_id=topic.id, message_id=message.id))
+            await _link_message_to_topic(session, topic.id, message.id)
             return
 
         topic_id = action.get("topic_id")
@@ -415,9 +441,9 @@ class TopicPipeline:
             if topic is not None:
                 topic.full_text = action.get("summary", topic.full_text)
                 topic.edited_at = now
-                topic.embedding = None
+                topic.embedding = await embed_text(topic.full_text, provider)
                 topic.salience_score = None
-                session.add(TopicMessageLinkDO(topic_id=topic.id, message_id=message.id))
+                await _link_message_to_topic(session, topic.id, message.id)
 
 
 class FactPipeline:
@@ -479,7 +505,7 @@ class FactPipeline:
 
             actions = _extract_actions(response, "facts")
             for action in actions:
-                await cls._apply_action(session, chatgroup.id, message, action, existing_facts)
+                await cls._apply_action(session, chatgroup.id, message, action, existing_facts, provider)
 
             message.processing_state = {**message.processing_state, "fact": ProcessingStatus.DONE}
             return True
@@ -520,10 +546,11 @@ class FactPipeline:
         message: MessageDO,
         action: dict,
         existing_facts: list[FactDO],
+        provider: Provider,
     ) -> None:
         """Apply one LLM-decided action: create a new fact, or update an existing one and
-        link the message to it (updated facts get their embedding cleared, so they are
-        re-embedded on the next embedding round)."""
+        link the message to it. The fact embedding is recomputed synchronously so the
+        candidate pool is never stale."""
         action_type = action.get("action", "skip")
         now = dt.datetime.now(dt.timezone.utc)
 
@@ -533,9 +560,10 @@ class FactPipeline:
                 full_text=action.get("summary", message.full_text),
                 start_at=message.created_at,
             )
+            await embed_object(fact, provider)
             session.add(fact)
             await session.flush()
-            session.add(FactMessageLinkDO(fact_id=fact.id, message_id=message.id))
+            await _link_message_to_fact(session, fact.id, message.id)
             return
 
         fact_id = action.get("fact_id")
@@ -546,6 +574,6 @@ class FactPipeline:
             if fact is not None:
                 fact.full_text = action.get("summary", fact.full_text)
                 fact.edited_at = now
-                fact.embedding = None
+                fact.embedding = await embed_text(fact.full_text, provider)
                 fact.salience_score = None
-                session.add(FactMessageLinkDO(fact_id=fact.id, message_id=message.id))
+                await _link_message_to_fact(session, fact.id, message.id)
