@@ -19,7 +19,7 @@ from backend.event.models import EventDO, EventMessageLinkDO
 from backend.fact.models import FactDO, FactMessageLinkDO
 from backend.llm import Provider
 from backend.llm.prompts import FACT_CANDIDATE, TOPIC_CANDIDATE
-from backend.llm.provider import ChoiceQuestion
+from backend.llm.provider import ChatError, ChoiceQuestion
 from backend.message.constants import MessageRole, ProcessingStatus
 from backend.message.models import MessageDO
 from backend.topic.models import TopicDO, TopicMessageLinkDO
@@ -116,17 +116,40 @@ def _extract_actions(response: object, plural_key: str) -> list[dict]:
     Models answering in JSON-object mode produce several valid shapes: a bare array,
     an object wrapping the actions under "actions" or the pipeline-specific plural key
     ("topics"/"facts"), or a single bare action object — all must be applied.
+
+    Also detects the failure mode where the model echoes back the JSON response schema
+    instead of filling it in, and raises a ChatError so the message is retried.
     """
     if isinstance(response, list):
-        return [action for action in response if isinstance(action, dict)]
+        actions: list[dict] = [action for action in response if isinstance(action, dict)]
+        _raise_if_schema(actions)
+        return actions
     if isinstance(response, dict):
+        _raise_if_schema(response)
         for key in ("actions", plural_key):
-            actions = response.get(key)
-            if isinstance(actions, list):
-                return [action for action in actions if isinstance(action, dict)]
+            raw_actions = response.get(key)
+            if isinstance(raw_actions, list):
+                _raise_if_schema(raw_actions)
+                return [action for action in raw_actions if isinstance(action, dict)]
         if isinstance(response.get("action"), str):
             return [response]
     return []
+
+
+def _raise_if_schema(value: object) -> None:
+    """Detect when the model returns a JSON Schema instead of actual actions.
+
+    Some models echo back the schema/response_format definition (with keys like
+    type/properties/required) instead of producing concrete data. Treat this as a
+    parse failure so the message is retried rather than silently marked done.
+    """
+    if not isinstance(value, dict):
+        return
+    if {"type", "properties", "required"}.issubset(set(value.keys())):
+        raise ChatError(f"LLM returned a JSON schema instead of data: {value}")
+    items = value.get("items")
+    if isinstance(items, dict) and {"type", "properties", "required"}.issubset(set(items.keys())):
+        raise ChatError(f"LLM returned a JSON schema instead of data: {value}")
 
 
 class EventPipeline:
