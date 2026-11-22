@@ -16,9 +16,7 @@ def test_chatgroup_prompts_defaults_are_the_prompt_constants():
     assert defaults.event_boundary_criteria == prompts.DEFAULT_EVENT_BOUNDARY_CRITERIA
     assert defaults.event_summary == prompts.EVENT_SUMMARY
     assert defaults.topic_candidate == prompts.TOPIC_CANDIDATE
-    assert defaults.topic_update == prompts.TOPIC_UPDATE
     assert defaults.fact_candidate == prompts.FACT_CANDIDATE
-    assert defaults.fact_update == prompts.FACT_UPDATE
 
 
 def test_decision_prompts_are_usable_question_material():

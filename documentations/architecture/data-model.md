@@ -121,13 +121,10 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `memory_ratio` | Category distribution used verbatim when the decision-model ratio is disabled or unusable. |
 | `use_llm_memory_ratio` | If `true`, ask the decision model for the ratio on every search. If `false`, use `memory_ratio`. |
 | `protected_message_count` | Number of most recent messages never added to facts/events/topics until newer messages push them out of the window. Default follows the deployment's `VISTUI_PROTECTED_MESSAGE_COUNT` setting (10). |
-| `topic_update_threshold` | Minimum score for a topic to be considered for updating. |
-| `fact_update_threshold` | Minimum score for a fact to be considered for updating. |
-| `fact_history_count` | Number of previous fact-linked messages sent to the LLM when updating a fact. |
-| `batch_inactivity_seconds` | Seconds of inactivity before the batch worker starts. |
-| `processing_timeout_seconds` | Max time a processing step may run before being marked failed (default 3600). |
 | `max_facts_per_message` | Maximum number of facts a single message can create or update (default 5). |
 | `max_topics_per_message` | Maximum number of topics a single message can create or update (default 5). |
+| `batch_inactivity_seconds` | Seconds of inactivity before the batch worker starts. |
+| `processing_timeout_seconds` | Max time a processing step may run before being marked failed (default 3600). |
 
 **ChatGroup prompts schema (stored in `prompts`; default texts in `sources/backend/llm/prompts.py`):**
 
@@ -140,10 +137,8 @@ A grouping created by a user to hold shared memory across one or more chats. It 
 | `event_boundary` | Instructions of the per-message event boundary choice question (decision task): how the message relates to the chat's last event. |
 | `event_boundary_criteria` | Criteria of the boundary question — keys ⊆ `extend`/`new`/`mixed` (at least two), values their descriptions. |
 | `event_summary` | Rebuild an event's summary from its full member list; must contain the `{messages}` placeholder. |
-| `topic_candidate` | Select up to `max_topics_per_message` existing topics to update, or decide to create new topics. |
-| `topic_update` | Update a specific topic given the message and ChatGroup context. |
-| `fact_candidate` | Select up to `max_facts_per_message` existing facts to update, or decide to create a new fact. |
-| `fact_update` | Update a specific fact given the message and its recent history. |
+| `topic_candidate` | Select up to `max_topics_per_message` existing topics to update (returning the new summary) or decide to create new topics. |
+| `fact_candidate` | Select up to `max_facts_per_message` existing facts to update (returning the new summary) or decide to create a new fact. |
 
 At creation, `prompts`, `ranking_formula`, and `config` are copied from system defaults unless explicitly supplied.
 
@@ -329,6 +324,7 @@ A Fact links to multiple Messages via `fact_message_links`. The latest linked me
   column; topic/fact clients no longer supply it).
 - 2026-07-11: Initial data model derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: memory_ratio is now a config default with optional LLM override, split fact prompts into `fact_candidate` and `fact_update`, split topic prompts into `topic_candidate` and `topic_update`, added embedding/salience as prerequisite batch pipelines.
+- 2026-12-01: Removed the `topic_update`/`fact_update` prompts and their associated config (`topic_update_threshold`, `fact_update_threshold`, `fact_history_count`); `topic_candidate`/`fact_candidate` now directly return create/update/skip actions.
 
 - 2026-11-21: `chatgroup.ranking_formula` stores the name of a formula defined in
   the settings file's `ranking_formulas` section (migration `0007` rewrote the

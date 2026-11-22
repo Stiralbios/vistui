@@ -64,12 +64,6 @@ overrides_models:
   topic_candidate:
     provider: "gomodel"
     model: "strata_toaster/iq3_xxs"
-  topic_update:
-    provider: "gomodel"
-    model: "strata_toaster/iq3_xxs"
   fact_candidate:
-    provider: "gomodel"
-    model: "strata_toaster/iq3_xxs"
-  fact_update:
     provider: "gomodel"
     model: "strata_toaster/iq3_xxs"

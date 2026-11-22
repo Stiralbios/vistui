@@ -87,15 +87,7 @@ overrides_models:
     provider: "remote-llm"
     model: "gpt-4o-mini"
     temperature: 0.2
-  topic_update:
-    provider: "remote-llm"
-    model: "gpt-4o-mini"
-    temperature: 0.2
   fact_candidate:
-    provider: "remote-llm"
-    model: "gpt-4o-mini"
-    temperature: 0.2
-  fact_update:
     provider: "remote-llm"
     model: "gpt-4o-mini"
     temperature: 0.2
@@ -141,7 +133,7 @@ class Provider:
     ) -> dict[str, DecisionAnswer]: ...
 ```
 
-- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event_boundary`, `event_summary`, `topic_candidate`, `topic_update`, `fact_candidate`, `fact_update`, or `default`). The same overrides map serves chat tasks and decision tasks: the batch salience stage calls `decide(..., task="salience")`, the event boundary call uses `task="event_boundary"` and the search ratio call `task="memory_ratio"`; both resolve their override with `defaults.decision` as fallback.
+- `task` selects the override config (e.g., `salience`, `memory_ratio`, `event_boundary`, `event_summary`, `topic_candidate`, `fact_candidate`, or `default`). The same overrides map serves chat tasks and decision tasks: the batch salience stage calls `decide(..., task="salience")`, the event boundary call uses `task="event_boundary"` and the search ratio call `task="memory_ratio"`; both resolve their override with `defaults.decision` as fallback.
 - If no override exists for a task, the `defaults.llm`, `defaults.embedding` or `defaults.decision` config is used.
 - The adapter parses the YAML and resolves `api_key_env` once at startup. The file can be reloaded on SIGHUP or via an admin endpoint.
 
@@ -167,9 +159,7 @@ class Provider:
 | `event_boundary` | ChatGroup description, the chat's last event (summary, time range), the new message (role, text, created_at). A decision task: the template becomes the instructions of one choice question whose criteria come from the chatgroup's `event_boundary_criteria` prompts key (extend / new / mixed); the highest-probability criterion wins. |
 | `event_summary` | the event's full member list, oldest first (`{messages}`). Always rebuilt from the sources, never from the previous summary. |
 | `topic_candidate` | existing topic summaries, new message, `max_topics_per_message`. |
-| `topic_update` | existing topic, new message, ChatGroup context. |
 | `fact_candidate` | existing fact summaries, new message, `max_facts_per_message`. |
-| `fact_update` | existing fact, new message, recent fact-linked messages. |
 
 ## Decision call semantics
 
@@ -232,6 +222,7 @@ conversational text.
   configurable per chatgroup via the `memory_ratio_criteria` prompts key.
 - 2026-07-11: Initial LLM provider design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: split `fact` task into `fact_candidate` and `fact_update`, split `topic` task into `topic_candidate` and `topic_update`.
+- 2026-12-01: Removed the separate `topic_update` and `fact_update` tasks; candidate prompts now directly emit the new/updated summary, so a single LLM call creates or updates topics and facts.
 - 2026-11-15: Added `defaults.decision` and `Provider.decide()` for System One decision models (`/v1/systemone`): typed `choice`/`noul`/`score` questions, probability answers, direct-ollama routing only.
 - 2026-11-15: Salience stages switched from batched calls (chunked at 5 questions) to
   element-per-element scoring — one `decide()` call per message / memory object.

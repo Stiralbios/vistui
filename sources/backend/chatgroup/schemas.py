@@ -9,11 +9,9 @@ from backend.llm.prompts import (
     EVENT_BOUNDARY,
     EVENT_SUMMARY,
     FACT_CANDIDATE,
-    FACT_UPDATE,
     MEMORY_RATIO,
     SALIENCE,
     TOPIC_CANDIDATE,
-    TOPIC_UPDATE,
 )
 from backend.search.formulas import DEFAULT_RANKING_FORMULA_NAME, get_ranking_formulas
 from backend.settings import AppSettings
@@ -39,9 +37,6 @@ class ChatGroupConfig(BaseModel):
     # messages push them out of the window. The default follows the deployment's
     # VISTUI_PROTECTED_MESSAGE_COUNT setting; each chatgroup can override it.
     protected_message_count: int = Field(default_factory=lambda: AppSettings().VISTUI_PROTECTED_MESSAGE_COUNT)
-    topic_update_threshold: float = 0.75
-    fact_update_threshold: float = 0.80
-    fact_history_count: int = 5
     max_facts_per_message: int = 5
     max_topics_per_message: int = 5
     batch_inactivity_seconds: int = 3600
@@ -72,9 +67,7 @@ class ChatGroupPrompts(BaseModel):
     # event's full message list.
     event_summary: str = EVENT_SUMMARY
     topic_candidate: str = TOPIC_CANDIDATE
-    topic_update: str = TOPIC_UPDATE
     fact_candidate: str = FACT_CANDIDATE
-    fact_update: str = FACT_UPDATE
 
     @field_validator("memory_ratio_criteria")
     @classmethod

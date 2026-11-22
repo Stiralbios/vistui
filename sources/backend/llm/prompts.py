@@ -92,10 +92,6 @@ Existing topics (id - summary):
 Maximum topics to touch: {max_topics}
 """
 
-# Placeholder: the topic pipeline applies update actions from the candidate call
-# directly, so no update prompt is consumed today.
-TOPIC_UPDATE = "Update a specific topic given the message and ChatGroup context."
-
 FACT_CANDIDATE = """\
 You are updating factual memories for a chat group.
 Given a new message and a list of existing facts, decide for each fact whether to update it,
@@ -116,7 +112,3 @@ Existing facts (id - summary):
 
 Maximum facts to touch: {max_facts}
 """
-
-# Placeholder: the fact pipeline applies update actions from the candidate call
-# directly, so no update prompt is consumed today.
-FACT_UPDATE = "Update a specific fact given the message and its recent history."

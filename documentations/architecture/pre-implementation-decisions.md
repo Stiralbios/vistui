@@ -17,9 +17,6 @@ The following values are used when a ChatGroup is created without explicit confi
 | `memory_ratio.fact` | Default fraction for facts. | 0.20 | |
 | `use_llm_memory_ratio` | Whether to call the LLM for memory ratio per message. | true | |
 | `protected_message_count` | Most recent messages excluded from consolidation. | 10 | |
-| `topic_update_threshold` | Min score for a topic to be considered for update. | 0.75 | |
-| `fact_update_threshold` | Min score for a fact to be considered for update. | 0.80 | |
-| `fact_history_count` | Messages linked to a fact sent during fact update. | 5 | |
 | `max_facts_per_message` | Max existing facts to update + new facts to create per message. | 5 | |
 | `max_topics_per_message` | Max existing topics to update + new topics to create per message. | 5 | |
 | `batch_inactivity_seconds` | Seconds of no activity before worker starts. | 3600 | |

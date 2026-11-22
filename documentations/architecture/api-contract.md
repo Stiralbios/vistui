@@ -146,9 +146,6 @@ Request:
     },
     "use_llm_memory_ratio": true,
     "protected_message_count": 10,
-    "topic_update_threshold": 0.75,
-    "fact_update_threshold": 0.80,
-    "fact_history_count": 5,
     "max_facts_per_message": 5,
     "max_topics_per_message": 5,
     "batch_inactivity_seconds": 3600,
@@ -163,9 +160,7 @@ Request:
     "event_boundary_criteria": {"extend": "...", "new": "...", "mixed": "..."},
     "event_summary": "...",
     "topic_candidate": "...",
-    "topic_update": "...",
-    "fact_candidate": "...",
-    "fact_update": "..."
+    "fact_candidate": "..."
   },
   "ranking_formula": "default"
 }
@@ -536,6 +531,7 @@ Token estimates use a simple tokenizer heuristic; exactness is not critical beca
   stored one requeues the derived artifacts.
 - 2026-07-11: Initial API contract derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: frontend terminology, removed memory_ratio from ChatGroup config, removed dedicated memory retrieval endpoint, split fact prompts into `fact_candidate` and `fact_update`, added embedding/salience processing state.
+- 2026-12-01: Removed the `topic_update`/`fact_update` prompts and the `topic_update_threshold`, `fact_update_threshold`, and `fact_history_count` config fields; `topic_candidate`/`fact_candidate` now directly return create/update/skip actions.
 
 - 2026-11-21: `ranking_formula` stores the *name* of a formula defined in the
   settings file's `ranking_formulas` section instead of lambda source (the create /

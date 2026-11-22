@@ -166,67 +166,39 @@ round may create many events or none at all.
 
 **Scope:** per ChatGroup.
 
-The topic pipeline uses two LLM calls.
-
-#### Step A: identify candidate topics
+The topic pipeline uses one LLM call per message.
 
 1. Select the oldest unprocessed message (`topic = waiting`) outside the protected window.
-2. Search existing Topics in the ChatGroup using the same retrieval ranking logic as interactive retrieval. If the message is not embedded yet, no existing topics are offered and the LLM can only create new ones.
+2. Search existing Topics in the ChatGroup by embedding similarity (the same retrieval ranking logic as interactive retrieval). If the message is not embedded yet, no existing topics are offered and the LLM can only create new ones.
 3. Send the message and the top matching topics to the `topic_candidate` LLM prompt.
-4. The LLM selects up to `max_topics_per_message` existing topics that might need updating, or decides that one or more new topics should be created.
+4. The LLM returns a list of actions: create a new topic, update an existing topic with a rewritten summary, or skip a topic.
 
-Outputs:
+Apply each action:
 
-- List of existing topic IDs to update (0 to `max_topics_per_message`).
-- Optional list of new topic texts to create.
+- **create** — create the Topic, link the current message to it, leave `embedding` and `salience_score` as `null` for the embedding and salience pipelines.
+- **update** — rewrite the topic text in place, link the current message to it, clear the topic's `embedding` and `salience_score` to `null`.
+- **skip** — do nothing.
 
-#### Step B: update each candidate topic
-
-1. For each selected existing topic, send the topic, the new message, and the ChatGroup context to the `topic_update` LLM prompt.
-2. The LLM decides whether to update the topic or leave it unchanged.
-3. If updated:
-   - Rewrite the topic text in place.
-   - Link the current message to the topic.
-   - Clear the topic's `embedding` and `salience_score` to `null`.
-4. If new topics were requested in Step A:
-   - Create each Topic.
-   - Link the current message to each new topic.
-   - Leave `embedding` and `salience_score` as `null` for the embedding and salience pipelines.
-5. Mark the message as `topic = done`.
+Mark the message as `topic = done`.
 
 ### Fact pipeline
 
 **Scope:** per ChatGroup.
 
-The fact pipeline uses two LLM calls.
+The fact pipeline uses one LLM call per message and is window-gated like events and topics: protected messages are never added to facts until they age out of the window. A fact itself is never protected from updates: once the updating message is outside the window, the fact can be rewritten in place.
 
-#### Step A: identify candidate facts
-
-1. Select the oldest unprocessed message (`fact = waiting`) outside the protected window —
-   like events and topics, protected messages are never added to facts until they age out of the window. A fact itself is never protected from updates: once the updating message is outside the window, the fact can be rewritten in place.
-2. Search existing Facts in the ChatGroup.
+1. Select the oldest unprocessed message (`fact = waiting`) outside the protected window.
+2. Search existing Facts in the ChatGroup by embedding similarity.
 3. Send the message and the top matching facts to the `fact_candidate` LLM prompt.
-4. The LLM selects up to `max_facts_per_message` existing facts that might need updating, or decides that a new fact should be created.
+4. The LLM returns a list of actions: create a new fact, update an existing fact with a rewritten summary, or skip a fact.
 
-Outputs:
+Apply each action:
 
-- List of existing fact IDs to update (0 to `max_facts_per_message`).
-- Optional new fact text to create.
+- **create** — create the Fact, link the current message to it, leave `embedding` and `salience_score` as `null` for the embedding and salience pipelines.
+- **update** — rewrite the fact text in place, link the current message to it, clear the fact's `embedding` and `salience_score` to `null`.
+- **skip** — do nothing.
 
-#### Step B: update each candidate fact
-
-1. For each selected existing fact, load the message plus the last `fact_history_count` messages linked to that fact.
-2. Send the bundle to the `fact_update` LLM prompt.
-3. The LLM decides whether to update the fact or leave it unchanged.
-4. If updated:
-   - Rewrite the fact text in place.
-   - Link the current message to the fact.
-   - Clear the fact's `embedding` and `salience_score` to `null`.
-5. If a new fact was requested in Step A:
-   - Create the Fact.
-   - Link the current message to it.
-   - Leave `embedding` and `salience_score` as `null` for the embedding and salience pipelines.
-6. Mark the message as `fact = done`.
+Mark the message as `fact = done`.
 
 A fact is rewritten in place when the underlying truth changes (e.g., "Mom is sick" → "Mom is on vacation").
 
@@ -363,6 +335,7 @@ Status response:
   [Corrected the same day: see the newer entry above — facts are window-gated again.]
 - 2026-07-11: Initial batch consolidation design derived from `startingpoint.md` and discussion.
 - 2026-07-11: Applied feedback: added embedding/salience as prerequisite batch pipelines, sequential per-message event→topic→fact ordering, event LLM can return multiple events, `fact_candidate` can create new facts, `fact_update` only updates existing facts.
+- 2026-12-01: Removed the separate `topic_update` and `fact_update` prompts; `topic_candidate` and `fact_candidate` now directly return create/update/skip actions, so consolidation applies updates in a single LLM call per message.
 
 - 2026-11-15: Salience scoring switched from batched `decide()` calls (one call per
   chatgroup, chunked at 5 questions) to element-per-element scoring (one call per
