@@ -45,6 +45,18 @@ def start_scheduler() -> None:
     any job persisted from an earlier run is removed. Safe to call on every app
     startup."""
     scheduler = get_scheduler()
+
+    # Ensure APScheduler's job store table exists before starting. On a fresh database
+    # the SQLAlchemyJobStore sometimes fails to create it in time, leading to repeated
+    # "apscheduler_jobs does not exist" polling errors.
+    job_store = scheduler._jobstores.get("default")
+    if isinstance(job_store, SQLAlchemyJobStore):
+        try:
+            job_store.jobs_t.create(job_store.engine, checkfirst=True)
+            logger.info("Ensured APScheduler job store table exists")
+        except Exception:
+            logger.exception("Could not ensure APScheduler job store table exists")
+
     interval = AppSettings().VISTUI_BATCH_INTERVAL_SECONDS
     if interval > 0:
         scheduler.add_job(
