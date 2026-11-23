@@ -27,6 +27,7 @@ from backend.topic.models import TopicDO, TopicMessageLinkDO
 from backend.utils.embeddings import embed_object, embed_text
 from loguru import logger
 from paradedb.sqlalchemy.vector import cosine_distance
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,30 +127,82 @@ async def _chat_json_plain(provider: Provider, messages: list[dict[str, str]], t
         raise ChatError(f"Invalid JSON from chat model: {exc}") from exc
 
 
+class _CreateAction(BaseModel):
+    action: str = Field(pattern="^(?i:create)$")
+    summary: str
+
+
+class _TopicUpdateAction(BaseModel):
+    action: str = Field(pattern="^(?i:update)$")
+    topic_id: str
+    summary: str
+
+
+class _TopicSkipAction(BaseModel):
+    action: str = Field(pattern="^(?i:skip)$")
+    topic_id: str
+
+
+class _FactUpdateAction(BaseModel):
+    action: str = Field(pattern="^(?i:update)$")
+    fact_id: str
+    summary: str
+
+
+class _FactSkipAction(BaseModel):
+    action: str = Field(pattern="^(?i:skip)$")
+    fact_id: str
+
+
+class _TopicActions(BaseModel):
+    actions: list[_CreateAction | _TopicUpdateAction | _TopicSkipAction]
+
+
+class _FactActions(BaseModel):
+    actions: list[_CreateAction | _FactUpdateAction | _FactSkipAction]
+
+
 def _extract_actions(response: object, plural_key: str) -> list[dict]:
-    """Normalize the LLM's JSON answer into a list of action dicts.
+    """Normalize and validate the LLM's JSON answer into a list of action dicts.
 
     Models answering in JSON-object mode produce several valid shapes: a bare array,
     an object wrapping the actions under "actions" or the pipeline-specific plural key
-    ("topics"/"facts"), or a single bare action object — all must be applied.
+    ("topics"/"facts"), or a single bare action object. Each action is validated against
+    the expected schema so malformed actions become ChatErrors (which retry the message).
 
     Also detects the failure mode where the model echoes back the JSON response schema
-    instead of filling it in, and raises a ChatError so the message is retried.
+    instead of filling it in.
     """
     if isinstance(response, list):
-        actions: list[dict] = [action for action in response if isinstance(action, dict)]
-        _raise_if_schema(actions)
-        return actions
-    if isinstance(response, dict):
+        payload: dict | list = response
+    elif isinstance(response, dict):
         _raise_if_schema(response)
         for key in ("actions", plural_key):
             raw_actions = response.get(key)
             if isinstance(raw_actions, list):
                 _raise_if_schema(raw_actions)
-                return [action for action in raw_actions if isinstance(action, dict)]
-        if isinstance(response.get("action"), str):
-            return [response]
-    return []
+                payload = raw_actions
+                break
+        else:
+            payload = response
+    else:
+        raise ChatError(f"LLM returned unexpected JSON type: {type(response).__name__}")
+
+    if isinstance(payload, dict):
+        payload = [payload]
+
+    model_class = _TopicActions if plural_key == "topics" else _FactActions
+    try:
+        validated = model_class(actions=payload)
+    except ValidationError as exc:
+        raise ChatError(f"LLM returned actions that do not match the expected schema: {exc}") from exc
+
+    result: list[dict] = []
+    for action in validated.actions:
+        data = action.model_dump()
+        # Remove None fields so downstream code can use .get(key) safely.
+        result.append({k: v for k, v in data.items() if v is not None})
+    return result
 
 
 def _raise_if_schema(value: object) -> None:
