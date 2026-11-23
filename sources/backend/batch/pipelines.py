@@ -6,6 +6,7 @@ returns the number of messages handled, so the BatchWorker can call them repeate
 """
 
 import datetime as dt
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -108,6 +109,21 @@ def _participant_names(chatgroup: ChatGroupDO) -> tuple[str, str]:
 def _speaker_name(message: MessageDO, user_name: str, assistant_name: str) -> str:
     """Name of the participant who wrote the message (system messages speak as the AI)."""
     return assistant_name if message.role == MessageRole.ASSISTANT else user_name
+
+
+async def _chat_json_plain(provider: Provider, messages: list[dict[str, str]], task: str) -> dict | list:
+    """Call the chat model without API-level JSON mode and parse the response.
+
+    Some OpenAI-compatible proxies/quantized models echo back the JSON schema when
+    `response_format={"type": "json_object"}` is used. The prompts already contain
+    explicit JSON instructions, so we request plain text and parse the JSON ourselves.
+    """
+    raw = await provider.chat(messages, task=task, json_mode=False)
+    content = raw if isinstance(raw, str) else str(raw)
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ChatError(f"Invalid JSON from chat model: {exc}") from exc
 
 
 def _extract_actions(response: object, plural_key: str) -> list[dict]:
@@ -376,7 +392,8 @@ class TopicPipeline:
             user_name, assistant_name = _participant_names(chatgroup)
             speaker = _speaker_name(message, user_name, assistant_name)
 
-            response = await provider.chat_json(
+            response = await _chat_json_plain(
+                provider,
                 [
                     {
                         "role": "user",
@@ -509,7 +526,8 @@ class FactPipeline:
             user_name, assistant_name = _participant_names(chatgroup)
             speaker = _speaker_name(message, user_name, assistant_name)
 
-            response = await provider.chat_json(
+            response = await _chat_json_plain(
+                provider,
                 [
                     {
                         "role": "user",
